@@ -1,12 +1,5 @@
-(executable
+(test
  (name test)
  (preprocess
   (pps ppx_let ppx_deriving.show ppx_deriving.eq ppx_deriving.ord))
  (libraries alcotest alcotest-async core async orewa))
-
-(alias
- (name integration)
- (deps
-  (:test test.exe))
- (action
-  (run %{test} --color=always)))

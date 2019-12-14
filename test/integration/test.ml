@@ -1,5 +1,6 @@
 open Core
 open Async
+open Alcotest
 
 (* This integration test will leak Redis keys left and right *)
 
@@ -7,71 +8,46 @@ let host = "localhost"
 
 let exceeding_read_buffer = 128 * 1024
 
-module Orewa_error = struct
-  type t =
-    [ Orewa.common_error
-    | `Redis_error of string
-    | `No_such_key of string
-    | `Not_expiring of string
-    | `Wrong_type of string
-    | `Index_out_of_range of string ]
-  [@@deriving show, eq]
-end
+let err = testable Error.pp (fun a b -> Error.compare a b = 0)
 
-let err = Alcotest.testable Orewa_error.pp Orewa_error.equal
-
-let ue = Alcotest.(result unit err)
-
-let be = Alcotest.(result bool err)
-
-let ie = Alcotest.(result int err)
-
-let fe = Alcotest.(result (float 0.01) err)
-
-let se = Alcotest.(result string err)
-
-let sle = Alcotest.(result (list string) err)
-
-let soe = Alcotest.(result (option string) err)
-
-let some_string = Alcotest.testable String.pp (const (const true))
-
-let bit = Alcotest.testable Orewa.pp_bit Orewa.equal_bit
-
-let colon ppf _ = Fmt.pf ppf ":@, "
-
-let dump_string ppf s = Fmt.pf ppf "%S" s
-
-let pp_binding = Fmt.(pair ~sep:colon dump_string dump_string)
-
-let smap_iter f m = String.Map.iteri m ~f:(fun ~key ~data -> f key data)
-
+let ue = result unit err
+let be                   = result bool err
+let ie                   = result int err
+let fe                   = result (float 0.01) err
+let se                   = result string err
+let sle                  = result (list string) err
+let soe                  = result (option string) err
+let some_string          = testable String.pp (const (const true))
+let colon ppf _          = Fmt.pf ppf ":@, "
+let dump_string ppf s    = Fmt.pf ppf "%S" s
+let pp_binding           = Fmt.(pair ~sep:colon dump_string dump_string)
+let smap_iter f m        = String.Map.iteri m ~f:(fun ~key ~data -> f key data)
 let string_string_map_pp = Fmt.(braces (iter_bindings ~sep:comma smap_iter pp_binding))
+let sm                   = testable string_string_map_pp (String.Map.equal String.equal)
+let sme                  = result sm err
+let span                 = testable Time_ns.Span.pp Time_ns.Span.equal
 
-let sm = Alcotest.testable string_string_map_pp (String.Map.equal String.equal)
-
-let sme = Alcotest.(result sm err)
+let wrong_type =
+  Or_error.error_string "WRONGTYPE Operation against a key holding the wrong kind of value"
+let no_such_key = Or_error.error_string "ERR no such key"
+let out_of_range = Or_error.error_string "ERR index out of range"
 
 let unordered_string_list =
-  Alcotest.(
-    testable
-      (pp (list string))
-      (fun a b ->
-        let equal = equal (list string) in
-        let compare = String.compare in
-        equal (List.sort ~compare a) (List.sort ~compare b)))
-
-type string_pair = string * string [@@deriving ord]
+  testable
+    (pp (list string))
+    (fun a b ->
+       let equal = equal (list string) in
+       let compare = String.compare in
+       equal (List.sort ~compare a) (List.sort ~compare b))
 
 let unordered_string_tuple_list =
-  Alcotest.(
     testable
       (pp (list (pair string string)))
       (fun a b ->
         let equal = equal (list (pair string string)) in
         equal
-          (List.sort ~compare:compare_string_pair a)
-          (List.sort ~compare:compare_string_pair b)))
+          (List.sort ~compare:Stdlib.compare a)
+          (List.sort ~compare:Stdlib.compare b))
 
 let truncated_string_pp formatter str =
   let str = Printf.sprintf "%s(...)" (String.prefix str 10) in
@@ -93,15 +69,20 @@ let random_key () =
   let random_string = String.init 7 ~f:alphanumeric_char in
   Printf.sprintf "redis-integration-%s" random_string
 
-let test_echo () =
-  Orewa.with_connection ~host @@ fun conn ->
+let endp = Host_and_port.create ~host:"localhost" ~port:6379
+
+let wc f =
+  Tcp.with_connection
+    (Tcp.Where_to_connect.of_host_and_port endp)
+    (fun _ r w -> f (Orewa.create r w))
+
+let test_echo conn =
   let message = "Hello" in
   let%bind response = Orewa.echo conn message in
   Alcotest.(check se) "ECHO faulty" (Ok message) response;
   return ()
 
-let test_set () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_set conn =
   let key = random_key () in
   let%bind res = Orewa.set conn ~key "value" in
   Alcotest.(check be) "Successfully SET" (Ok true) res;
@@ -114,8 +95,7 @@ let test_set () =
   Alcotest.(check be) "Didn't SET non-existing" (Ok false) res;
   return ()
 
-let test_get () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_get conn =
   let key = random_key () in
   let value = random_key () in
   let%bind _ = Orewa.set conn ~key value in
@@ -123,8 +103,7 @@ let test_get () =
   Alcotest.(check soe) "Correct response" (Ok (Some value)) res;
   return ()
 
-let test_getset () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_getset conn =
   let key = random_key () in
   let value = random_key () in
   let value' = random_key () in
@@ -134,8 +113,7 @@ let test_getset () =
   Alcotest.(check soe) "Setting existing key returns previous value" (Ok (Some value)) res;
   return ()
 
-let test_strlen () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_strlen conn =
   let key = random_key () in
   let value = random_key () in
   let%bind res = Orewa.strlen conn key in
@@ -148,8 +126,7 @@ let test_strlen () =
     res;
   return ()
 
-let test_mget () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_mget conn =
   let key = random_key () in
   let non_existing_key = random_key () in
   let value = random_key () in
@@ -161,8 +138,7 @@ let test_mget () =
     res;
   return ()
 
-let test_msetnx () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_msetnx conn =
   let key = random_key () in
   let value = random_key () in
   let key' = random_key () in
@@ -186,8 +162,7 @@ let test_msetnx () =
     res;
   return ()
 
-let test_mset () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_mset conn =
   let key = random_key () in
   let value = random_key () in
   let key' = random_key () in
@@ -201,34 +176,31 @@ let test_mset () =
     res;
   return ()
 
-let test_getrange () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_getrange conn =
   let key = random_key () in
   let not_existing_key = random_key () in
   let value = "Hello" in
   let%bind _ = Orewa.set conn ~key value in
-  let%bind res = Orewa.getrange conn key ~start:1 ~end':3 in
+  let%bind res = Orewa.getrange conn key ~start:1 ~stop:3 in
   Alcotest.(check se) "Correct response" (Ok "ell") res;
-  let%bind res = Orewa.getrange conn not_existing_key ~start:1 ~end':3 in
+  let%bind res = Orewa.getrange conn not_existing_key ~start:1 ~stop:3 in
   Alcotest.(check se) "Correct response" (Ok "") res;
   return ()
 
-let test_set_expiry () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_set_expiry conn =
   let key = random_key () in
   let value = random_key () in
-  let expire = Time.Span.of_ms 200. in
+  let expire = Time_ns.Span.of_int_ms 200 in
   let%bind res = Orewa.set conn ~key ~expire value in
   Alcotest.(check be) "Correctly SET expiry" (Ok true) res;
   let%bind res = Orewa.get conn key in
   Alcotest.(check soe) "Key still exists" (Ok (Some value)) res;
-  let%bind () = after Time.Span.(expire / 0.75) in
+  let%bind () = Clock_ns.after Time_ns.Span.(expire / 0.75) in
   let%bind res = Orewa.get conn key in
   Alcotest.(check soe) "Key has expired" (Ok None) res;
   return ()
 
-let test_large_set_get () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_large_set_get conn =
   let key = random_key () in
   let value = String.init exceeding_read_buffer ~f:(fun _ -> 'a') in
   let%bind res = Orewa.set conn ~key value in
@@ -237,8 +209,7 @@ let test_large_set_get () =
   Alcotest.(check soe) "Large GET retrieves everything" (Ok (Some value)) res;
   return ()
 
-let test_lpush () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_lpush conn =
   let key = random_key () in
   let not_list = random_key () in
   let element = "value" in
@@ -250,11 +221,10 @@ let test_lpush () =
   Alcotest.(check ie) "LPUSH to existing list" (Ok 2) res;
   let%bind _ = Orewa.set conn ~key:not_list element in
   let%bind res = Orewa.lpush conn ~element not_list in
-  Alcotest.(check ie) "LPUSH to not a list" (Error (`Wrong_type not_list)) res;
+  Alcotest.(check ie) "LPUSH to not a list" wrong_type res;
   return ()
 
-let test_rpush () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_rpush conn =
   let key = random_key () in
   let not_list = random_key () in
   let element = "value" in
@@ -266,11 +236,10 @@ let test_rpush () =
   Alcotest.(check ie) "RPUSH to existing list" (Ok 2) res;
   let%bind _ = Orewa.set conn ~key:not_list element in
   let%bind res = Orewa.rpush conn ~element not_list in
-  Alcotest.(check ie) "RPUSH to not a list" (Error (`Wrong_type not_list)) res;
+  Alcotest.(check ie) "RPUSH to not a list" wrong_type res;
   return ()
 
-let test_lpush_lrange () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_lpush_lrange conn =
   let key = random_key () in
   let element = random_key () in
   let element' = random_key () in
@@ -283,8 +252,7 @@ let test_lpush_lrange () =
     res;
   return ()
 
-let test_large_lrange () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_large_lrange conn =
   let key = random_key () in
   let element = String.init exceeding_read_buffer ~f:(fun _ -> 'a') in
   let values = 5 in
@@ -297,8 +265,7 @@ let test_large_lrange () =
   Alcotest.(check (result (list truncated_string) err)) "LRANGE failed" (Ok expected) res;
   return ()
 
-let test_rpoplpush () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_rpoplpush conn =
   let source = random_key () in
   let destination = random_key () in
   let element = "three" in
@@ -310,52 +277,39 @@ let test_rpoplpush () =
   Alcotest.(check se) "RPOPLPUSH moved the correct element" (Ok element) res;
   let%bind _ = Orewa.set conn ~key:not_list element in
   let%bind res = Orewa.rpoplpush conn ~source ~destination:not_list in
-  let wrong_move_destination = Printf.sprintf "%s -> %s" source not_list in
-  Alcotest.(check se)
-    "RPOPLPUSH failed to move to non-list"
-    (Error (`Wrong_type wrong_move_destination))
-    res;
+  Alcotest.(check se) "RPOPLPUSH failed to move to non-list" wrong_type res;
   let%bind res = Orewa.rpoplpush conn ~source:not_list ~destination in
-  let wrong_move_source = Printf.sprintf "%s -> %s" not_list destination in
-  Alcotest.(check se)
-    "RPOPLPUSH failed to move from non-list"
-    (Error (`Wrong_type wrong_move_source))
-    res;
+  Alcotest.(check se) "RPOPLPUSH failed to move from non-list" wrong_type res;
   return ()
 
-let test_append () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_append conn =
   let key = random_key () in
   let value = random_key () in
   let%bind res = Orewa.append conn ~key value in
   Alcotest.(check (result int err)) "APPEND unexpected" (Ok (String.length value)) res;
   return ()
 
-let test_auth () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_auth conn =
   let password = random_key () in
   let%bind res = Orewa.auth conn password in
-  let expected = Error (`Redis_error "ERR Client sent AUTH, but no password is set") in
+  let expected = Or_error.error_string "ERR Client sent AUTH, but no password is set" in
   Alcotest.(check (result unit err)) "AUTH failed" expected res;
   return ()
 
-let test_bgrewriteaof () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_bgrewriteaof conn =
   let%bind res = Orewa.bgrewriteaof conn in
   let expected = Ok "blurb" in
   Alcotest.(check (result some_string err)) "BGREWRITEAOF failed" expected res;
   let%bind _ = Deferred.ok @@ after (Time.Span.of_sec 1.) in
   return ()
 
-let test_bgsave () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_bgsave conn =
   let%bind res = Orewa.bgsave conn in
   let expected = Ok "blurb" in
   Alcotest.(check (result some_string err)) "BGSAVE failed" expected res;
   return ()
 
-let test_bitcount () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_bitcount conn =
   let key = random_key () in
   let%bind _ = Orewa.set conn ~key "aaaa" in
   let%bind res = Orewa.bitcount conn key in
@@ -364,8 +318,7 @@ let test_bitcount () =
   Alcotest.(check (result int err)) "BITCOUNT failed" (Ok 6) res;
   return ()
 
-let test_bitop () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_bitop conn =
   let key = random_key () in
   let destkey = random_key () in
   let value = "aaaa" in
@@ -377,47 +330,43 @@ let test_bitop () =
   Alcotest.(check (result int err)) "BITOP failed" expected res;
   return ()
 
-let test_bitpos () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_bitpos conn =
   let key = random_key () in
   let value = "\000\001\000\000\001" in
   let expected = Ok (Some 15) in
   let%bind _ = Orewa.set conn ~key value in
-  let%bind res = Orewa.bitpos conn key One in
+  let%bind res = Orewa.bitpos conn key true in
   Alcotest.(check (result (option int) err)) "BITPOS failed" expected res;
-  let%bind res = Orewa.bitpos conn ~start:2 key One in
+  let%bind res = Orewa.bitpos conn ~start:2 key true in
   let expected = Ok (Some 39) in
   Alcotest.(check (result (option int) err)) "BITPOS failed" expected res;
-  let%bind res = Orewa.bitpos conn ~start:2 ~end':3 key One in
+  let%bind res = Orewa.bitpos conn ~start:2 ~stop:3 key true in
   let expected = Ok None in
   Alcotest.(check (result (option int) err)) "BITPOS failed" expected res;
   return ()
 
-let test_getbit () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_getbit conn =
   let key = random_key () in
   let value = "\001" in
   let%bind _ = Orewa.set conn ~key value in
-  let expected = Ok Orewa.Zero in
+  let expected = Ok false in
   let%bind res = Orewa.getbit conn key 0 in
-  Alcotest.(check (result bit err)) "GETBIT failed" expected res;
-  let expected = Ok Orewa.Zero in
+  Alcotest.(check (result bool err)) "GETBIT failed" expected res;
+  let expected = Ok false in
   let%bind res = Orewa.getbit conn key 8 in
-  Alcotest.(check (result bit err)) "GETBIT failed" expected res;
+  Alcotest.(check (result bool err)) "GETBIT failed" expected res;
   return ()
 
-let test_setbit () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_setbit conn =
   let key = random_key () in
   let offset = 10 in
-  let%bind res = Orewa.setbit conn key offset Orewa.One in
-  Alcotest.(check (result bit err)) "SETBIT failed" (Ok Orewa.Zero) res;
-  let%bind res = Orewa.setbit conn key offset Orewa.Zero in
-  Alcotest.(check (result bit err)) "SETBIT failed" (Ok Orewa.One) res;
+  let%bind res = Orewa.setbit conn key offset true in
+  Alcotest.(check (result bool err)) "SETBIT failed" (Ok false) res;
+  let%bind res = Orewa.setbit conn key offset false in
+  Alcotest.(check (result bool err)) "SETBIT failed" (Ok true) res;
   return ()
 
-let test_bitfield () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_bitfield conn =
   let key = random_key () in
   let ile = Alcotest.(result (list (option int)) err) in
   let intsize = Orewa.Unsigned 8 in
@@ -458,8 +407,7 @@ let test_bitfield () =
   Alcotest.(check ile) "Failing overflow works" (Ok [None]) res;
   return ()
 
-let test_decr () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_decr conn =
   let key = random_key () in
   let value = 42 in
   let%bind _ = Orewa.set conn ~key (string_of_int value) in
@@ -467,8 +415,7 @@ let test_decr () =
   Alcotest.(check (result int err)) "DECR failed" (Ok (Int.pred value)) res;
   return ()
 
-let test_decrby () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_decrby conn =
   let key = random_key () in
   let value = 42 in
   let decrement = 23 in
@@ -477,8 +424,7 @@ let test_decrby () =
   Alcotest.(check (result int err)) "DECRBY failed" (Ok (value - decrement)) res;
   return ()
 
-let test_incr () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_incr conn =
   let key = random_key () in
   let value = 42 in
   let%bind _ = Orewa.set conn ~key (string_of_int value) in
@@ -486,8 +432,7 @@ let test_incr () =
   Alcotest.(check (result int err)) "INCR failed" (Ok (Int.succ value)) res;
   return ()
 
-let test_incrby () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_incrby conn =
   let key = random_key () in
   let value = 42 in
   let increment = 23 in
@@ -496,23 +441,20 @@ let test_incrby () =
   Alcotest.(check (result int err)) "INCRBY failed" (Ok (value + increment)) res;
   return ()
 
-let test_incrbyfloat () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_incrbyfloat conn =
   let key = random_key () in
   let increment = 42. in
   let%bind res = Orewa.incrbyfloat conn key increment in
   Alcotest.(check (result (float 0.1) err)) "INCRBYFLOAT failed" (Ok increment) res;
   return ()
 
-let test_select () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_select conn =
   let index = 5 in
   let%bind res = Orewa.select conn index in
   Alcotest.(check (result unit err)) "SELECT failed" (Ok ()) res;
   return ()
 
-let test_del () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_del conn =
   let key = random_key () in
   let key' = random_key () in
   let value = "aaaa" in
@@ -522,8 +464,7 @@ let test_del () =
   Alcotest.(check (result int err)) "DEL failed" (Ok 2) res;
   return ()
 
-let test_exists () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_exists conn =
   let existing = random_key () in
   let missing = random_key () in
   let value = "aaaa" in
@@ -532,39 +473,36 @@ let test_exists () =
   Alcotest.(check (result int err)) "EXISTS failed" (Ok 1) res;
   return ()
 
-let test_expire () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_expire conn =
   let key = random_key () in
   let value = "aaaa" in
-  let expire = Time.Span.of_ms 200. in
+  let expire = Time_ns.Span.of_int_ms 200 in
   let%bind _ = Orewa.set conn ~key value in
   let%bind res = Orewa.expire conn key expire in
   Alcotest.(check (result int err)) "Correctly SET expiry" (Ok 1) res;
   let%bind res = Orewa.exists conn key in
   Alcotest.(check (result int err)) "Key still exists" (Ok 1) res;
-  let%bind () = after Time.Span.(expire / 0.75) in
+  let%bind () = Clock_ns.after Time_ns.Span.(expire / 0.75) in
   let%bind res = Orewa.exists conn key in
   Alcotest.(check (result int err)) "Key has expired" (Ok 0) res;
   return ()
 
-let test_expireat () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_expireat conn =
   let key = random_key () in
   let value = "aaaa" in
-  let expire = Time.Span.of_ms 200. in
-  let at = Time.add (Time.now ()) expire in
+  let expire = Time_ns.Span.of_int_ms 200 in
+  let at = Time_ns.(add (now ()) expire) in
   let%bind _ = Orewa.set conn ~key value in
   let%bind res = Orewa.expireat conn key at in
   Alcotest.(check (result int err)) "Correctly SET expiry" (Ok 1) res;
   let%bind res = Orewa.exists conn key in
   Alcotest.(check (result int err)) "Key still exists" (Ok 1) res;
-  let%bind () = after Time.Span.(expire / 0.75) in
+  let%bind () = Clock_ns.after Time_ns.Span.(expire / 0.75) in
   let%bind res = Orewa.exists conn key in
   Alcotest.(check (result int err)) "Key has expired" (Ok 0) res;
   return ()
 
-let test_keys () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_keys conn =
   let prefix = random_key () in
   let key1 = prefix ^ random_key () in
   let key2 = prefix ^ random_key () in
@@ -581,8 +519,7 @@ let test_keys () =
   Alcotest.(check (result (list string) err)) "Returns no keys" (Ok []) res;
   return ()
 
-let test_sadd () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sadd conn =
   let key = random_key () in
   let zero = "0" in
   let dup = "dup" in
@@ -596,8 +533,7 @@ let test_sadd () =
   Alcotest.(check (result int err)) "Skips multiple duplicate value" (Ok 1) res;
   return ()
 
-let test_scard () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_scard conn =
   let key = random_key () in
   let dup = "dup" in
   let%bind res = Orewa.scard conn key in
@@ -610,8 +546,7 @@ let test_scard () =
   Alcotest.(check (result int err)) "New set has even more members" (Ok 4) res;
   return ()
 
-let test_sdiff () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sdiff conn =
   let key1 = random_key () in
   let key2 = random_key () in
   let%bind _ = Orewa.sadd conn ~key:key1 "a" ~members:["b"; "c"] in
@@ -623,8 +558,7 @@ let test_sdiff () =
     res;
   return ()
 
-let test_sdiffstore () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sdiffstore conn =
   let key1 = random_key () in
   let key2 = random_key () in
   let destination = random_key () in
@@ -634,8 +568,7 @@ let test_sdiffstore () =
   Alcotest.(check (result int err)) "New set the right amount of members" (Ok 2) res;
   return ()
 
-let test_sinter () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sinter conn =
   let key1 = random_key () in
   let key2 = random_key () in
   let%bind _ = Orewa.sadd conn ~key:key1 "a" ~members:["b"; "c"] in
@@ -647,8 +580,7 @@ let test_sinter () =
     res;
   return ()
 
-let test_sinterstore () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sinterstore conn =
   let key1 = random_key () in
   let key2 = random_key () in
   let destination = random_key () in
@@ -663,8 +595,7 @@ let test_sinterstore () =
   Alcotest.(check (result int err)) "The right members are in the new set" (Ok 1) res;
   return ()
 
-let test_sismember () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sismember conn =
   let key = random_key () in
   let member = "aaa" in
   let not_member = "bbb" in
@@ -677,8 +608,7 @@ let test_sismember () =
   Alcotest.(check (result bool err)) "Not member in set" (Ok false) res;
   return ()
 
-let test_smembers () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_smembers conn =
   let key = random_key () in
   let member = "aaa" in
   let%bind res = Orewa.smembers conn key in
@@ -688,8 +618,7 @@ let test_smembers () =
   Alcotest.(check (result (list string) err)) "Members in existent set" (Ok [member]) res;
   return ()
 
-let test_smove () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_smove conn =
   let source = random_key () in
   let destination = random_key () in
   let member = "aaa" in
@@ -707,8 +636,7 @@ let test_smove () =
   Alcotest.(check (result bool err)) "Correctly arrived in destination" (Ok true) res;
   return ()
 
-let test_spop () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_spop conn =
   let key = random_key () in
   let%bind res = Orewa.spop conn key in
   Alcotest.(check (result (list string) err)) "Popping from nonexistent set" (Ok []) res;
@@ -726,8 +654,7 @@ let test_spop () =
   Alcotest.(check (result int err)) "Set is empty now" (Ok 0) res;
   return ()
 
-let test_srandmember () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_srandmember conn =
   let key = random_key () in
   let%bind res = Orewa.srandmember conn key in
   Alcotest.(check (result (list string) err))
@@ -749,8 +676,7 @@ let test_srandmember () =
     (length res);
   return ()
 
-let test_srem () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_srem conn =
   let key = random_key () in
   let members = ["b"; "c"; "d"] in
   let%bind _ = Orewa.sadd conn ~key "a" ~members in
@@ -762,8 +688,7 @@ let test_srem () =
   Alcotest.(check (result int err)) "Set is empty now" (Ok 0) res;
   return ()
 
-let test_sunion () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sunion conn =
   let key1 = random_key () in
   let key2 = random_key () in
   let%bind _ = Orewa.sadd conn ~key:key1 "a" ~members:["b"; "c"] in
@@ -775,8 +700,7 @@ let test_sunion () =
     res;
   return ()
 
-let test_sunionstore () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sunionstore conn =
   let key1 = random_key () in
   let key2 = random_key () in
   let destination = random_key () in
@@ -791,8 +715,7 @@ let test_sunionstore () =
   Alcotest.(check (result int err)) "The right members are in the new set" (Ok 5) res;
   return ()
 
-let test_sscan () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sscan conn =
   let key = random_key () in
   let count = 20 in
   let members =
@@ -806,8 +729,7 @@ let test_sscan () =
   Alcotest.(check unordered_string_list) "Returns the right keys" members res;
   return ()
 
-let test_scan () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_scan conn =
   let prefix = random_key () in
   let value = "aaaa" in
   let count = 20 in
@@ -824,8 +746,7 @@ let test_scan () =
   Alcotest.(check unordered_string_list) "Returns the right keys" expected_keys res;
   return ()
 
-let test_move () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_move conn =
   let key = random_key () in
   let value = "aaaa" in
   let other_db = 4 in
@@ -842,12 +763,11 @@ let test_move () =
   Alcotest.(check (result bool err)) "MOVE failed as expected" (Ok false) res;
   return ()
 
-let test_persist () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_persist conn =
   let key = random_key () in
   let missing_key = random_key () in
   let value = "aaaa" in
-  let%bind _ = Orewa.set conn ~expire:(Time.Span.of_sec 30.) ~key value in
+  let%bind _ = Orewa.set conn ~expire:(Time_ns.Span.of_int_sec 30) ~key value in
   let%bind res = Orewa.persist conn key in
   Alcotest.(check (result bool err)) "Set key to persistent" (Ok true) res;
   let%bind res = Orewa.persist conn key in
@@ -856,8 +776,7 @@ let test_persist () =
   Alcotest.(check (result bool err)) "Missing key couldn't be persisted" (Ok false) res;
   return ()
 
-let test_randomkey () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_randomkey conn =
   let key = random_key () in
   let value = "aaaa" in
   let%bind _ = Orewa.set conn ~key value in
@@ -865,8 +784,7 @@ let test_randomkey () =
   Alcotest.(check (result some_string err)) "Got random key" (Ok "anything") res;
   return ()
 
-let test_rename () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_rename conn =
   let key = random_key () in
   let new_key = random_key () in
   let value = "aaaa" in
@@ -879,8 +797,7 @@ let test_rename () =
   Alcotest.(check soe) "Key gone in old location" (Ok None) res;
   return ()
 
-let test_renamenx () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_renamenx conn =
   let key = random_key () in
   let new_key = random_key () in
   let value = "aaaa" in
@@ -900,8 +817,7 @@ type sort_result =
   | `Sorted of string list ]
 [@@deriving show, eq]
 
-let test_sort () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_sort conn =
   let key = random_key () in
   let randomly_ordered =
     List.range 0 10 |> List.map ~f:(fun _ -> Random.State.int random_state 1000)
@@ -941,50 +857,46 @@ let test_sort () =
     res;
   return ()
 
-let test_ttl () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_ttl conn =
   let key = random_key () in
   let missing_key = random_key () in
   let persistent_key = random_key () in
   let%bind res = Orewa.ttl conn missing_key in
-  let span = Alcotest.testable Time.Span.pp Time.Span.equal in
   Alcotest.(check (result span err))
     "No TTL on missing keys"
-    (Error (`No_such_key missing_key))
+    (Or_error.errorf "No_such_key %s" missing_key)
     res;
   let%bind _ = Orewa.set conn ~key:persistent_key "aaaa" in
   let%bind res = Orewa.ttl conn persistent_key in
   Alcotest.(check (result span err))
     "No TTL on persistent key"
-    (Error (`Not_expiring persistent_key))
+    (Or_error.errorf "Not_expiring %s" persistent_key)
     res;
-  let expire = Time.Span.of_ms 200. in
+  let expire = Time_ns.Span.of_ms 200. in
   let%bind _ = Orewa.set conn ~expire ~key "aaaa" in
   let subspan =
-    Alcotest.testable Time.Span.pp (fun a b ->
-        Time.Span.(a <= expire) && Time.Span.(b <= expire))
+    Alcotest.testable Time_ns.Span.pp (fun a b ->
+        Time_ns.Span.(a <= expire) && Time_ns.Span.(b <= expire))
   in
   let%bind res = Orewa.ttl conn key in
   Alcotest.(check (result subspan err)) "TTL not larger than before" (Ok expire) res;
   return ()
 
-let test_type' () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_typ conn =
   let string_key = random_key () in
   let list_key = random_key () in
   let missing_key = random_key () in
   let%bind _ = Orewa.set conn ~key:string_key "aaaa" in
   let%bind _ = Orewa.lpush conn ~element:"aaaa" list_key in
-  let%bind res = Orewa.type' conn string_key in
+  let%bind res = Orewa.typ conn string_key in
   Alcotest.(check soe) "Finds string" (Ok (Some "string")) res;
-  let%bind res = Orewa.type' conn list_key in
+  let%bind res = Orewa.typ conn list_key in
   Alcotest.(check soe) "Finds list" (Ok (Some "list")) res;
-  let%bind res = Orewa.type' conn missing_key in
+  let%bind res = Orewa.typ conn missing_key in
   Alcotest.(check soe) "No hits" (Ok None) res;
   return ()
 
-let test_dump () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_dump conn =
   let key = random_key () in
   let missing_key = random_key () in
   let%bind _ = Orewa.set conn ~key "aaaa" in
@@ -995,8 +907,7 @@ let test_dump () =
   Alcotest.(check dump_result) "Dumping missing key" (Ok None) res;
   return ()
 
-let test_restore () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_restore conn =
   let key = random_key () in
   let list_key = random_key () in
   let new_key = random_key () in
@@ -1017,8 +928,7 @@ let test_restore () =
   Alcotest.(check (result (list string) err)) "Correct value restored" (Ok [element]) res;
   return ()
 
-let test_pipelining () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_pipelining conn =
   (* Test that we in parallel can do multiple requests *)
   let prefix = random_key () in
   let key i = Printf.sprintf "%s.%d" prefix i in
@@ -1041,20 +951,18 @@ let test_pipelining () =
   in
   return ()
 
-let test_close () =
-  let%bind conn = Orewa.connect ?port:None ~host in
-  let key = random_key () in
-  let%bind res = Orewa.set conn ~key "test" in
-  Alcotest.(check be) "Set test key" (Ok true) res;
-  let%bind res = Orewa.get conn key in
-  Alcotest.(check soe) "Get test key" (Ok (Some "test")) res;
-  let%bind () = Orewa.close conn in
-  let%bind res = Orewa.get conn key in
-  Alcotest.(check soe) "Get test key" (Error `Connection_closed) res;
-  return ()
+(* let test_close conn =
+ *   let key = random_key () in
+ *   let%bind res = Orewa.set conn ~key "test" in
+ *   Alcotest.(check be) "Set test key" (Ok true) res;
+ *   let%bind res = Orewa.get conn key in
+ *   Alcotest.(check soe) "Get test key" (Ok (Some "test")) res;
+ *   let%bind () = Orewa.close conn in
+ *   let%bind res = Orewa.get conn key in
+ *   Alcotest.(check soe) "Get test key" (Or_error.error_string "Connection_closed") res;
+ *   return () *)
 
-let test_lindex () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_lindex conn =
   let key = random_key () in
   let element = random_key () in
   let%bind res = Orewa.lindex conn key 0 in
@@ -1069,22 +977,20 @@ let test_lindex () =
   Alcotest.(check soe) "Get second element of non-empty list" (Ok (Some element)) res;
   return ()
 
-let test_linsert () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_linsert conn =
   let key = random_key () in
   let element = random_key () in
   let pivot = random_key () in
-  let%bind res = Orewa.linsert conn ~key Orewa.Before ~element ~pivot in
+  let%bind res = Orewa.linsert conn ~key `Before ~element ~pivot in
   Alcotest.(check ie) "Insert into nonexisting list" (Ok 0) res;
   let%bind _ = Orewa.lpush conn ~element:pivot key in
-  let%bind res = Orewa.linsert conn ~key Orewa.Before ~element ~pivot in
+  let%bind res = Orewa.linsert conn ~key `Before ~element ~pivot in
   Alcotest.(check ie) "Insert before into existing list" (Ok 2) res;
-  let%bind res = Orewa.linsert conn ~key Orewa.After ~element ~pivot in
+  let%bind res = Orewa.linsert conn ~key `After ~element ~pivot in
   Alcotest.(check ie) "Insert after into existing list" (Ok 3) res;
   return ()
 
-let test_llen () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_llen conn =
   let key = random_key () in
   let element = random_key () in
   let%bind res = Orewa.llen conn key in
@@ -1094,8 +1000,7 @@ let test_llen () =
   Alcotest.(check ie) "Lenght of existing list" (Ok 1) res;
   return ()
 
-let test_lpop () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_lpop conn =
   let key = random_key () in
   let not_list = random_key () in
   let element = random_key () in
@@ -1104,15 +1009,14 @@ let test_lpop () =
   Alcotest.(check soe) "Pop from empty key" (Ok None) res;
   let%bind _ = Orewa.set conn ~key:not_list "this is not a list" in
   let%bind res = Orewa.lpop conn not_list in
-  Alcotest.(check soe) "Pop from not a list" (Error (`Wrong_type not_list)) res;
+  Alcotest.(check soe) "Pop from not a list" wrong_type res;
   let%bind _ = Orewa.lpush conn ~element key in
   let%bind _ = Orewa.lpush conn ~element:left_element key in
   let%bind res = Orewa.lpop conn key in
   Alcotest.(check soe) "Pop from existing list" (Ok (Some left_element)) res;
   return ()
 
-let test_rpop () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_rpop conn =
   let key = random_key () in
   let not_list = random_key () in
   let element = random_key () in
@@ -1121,15 +1025,14 @@ let test_rpop () =
   Alcotest.(check soe) "Pop from empty key" (Ok None) res;
   let%bind _ = Orewa.set conn ~key:not_list "this is not a list" in
   let%bind res = Orewa.rpop conn not_list in
-  Alcotest.(check soe) "Pop from not a list" (Error (`Wrong_type not_list)) res;
+  Alcotest.(check soe) "Pop from not a list" wrong_type res;
   let%bind _ = Orewa.lpush conn ~element:right_element key in
   let%bind _ = Orewa.lpush conn ~element key in
   let%bind res = Orewa.rpop conn key in
   Alcotest.(check soe) "Pop from existing list" (Ok (Some right_element)) res;
   return ()
 
-let test_lrem () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_lrem conn =
   let key = random_key () in
   let element = random_key () in
   let%bind _ = Orewa.lpush conn key ~element in
@@ -1149,38 +1052,32 @@ let test_lrem () =
   Alcotest.(check ie) "Trying to remove not existing element" (Ok 0) res;
   return ()
 
-let test_lset () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_lset conn =
   let key = random_key () in
   let element = random_key () in
   let%bind res = Orewa.lset conn ~key 0 ~element in
-  Alcotest.(check ue) "Setting nonexistent list" (Error (`No_such_key key)) res;
+  Alcotest.(check ue) "Setting nonexistent list" no_such_key res;
   let%bind _ = Orewa.lpush conn key ~element in
   let%bind res = Orewa.lset conn ~key 0 ~element in
   Alcotest.(check ue) "Setting existent index of list" (Ok ()) res;
   let%bind res = Orewa.lset conn ~key 1 ~element in
-  Alcotest.(check ue)
-    "Setting non-existent index of list"
-    (Error (`Index_out_of_range key))
-    res;
+  Alcotest.(check ue) "Setting non-existent index of list" out_of_range res;
   return ()
 
-let test_ltrim () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_ltrim conn =
   let key = random_key () in
   let element = random_key () in
   let elements = 10 in
   let%bind _ =
     List.init elements ~f:(fun _ -> Orewa.lpush conn key ~element) |> Deferred.all
   in
-  let%bind res = Orewa.ltrim conn ~start:0 ~end':4 key in
+  let%bind res = Orewa.ltrim conn ~start:0 ~stop:4 key in
   Alcotest.(check ue) "Trimming list" (Ok ()) res;
   let%bind res = Orewa.llen conn key in
   Alcotest.(check ie) "List is trimmed" (Ok 5) res;
   return ()
 
-let test_hset () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hset conn =
   let key = random_key () in
   let random_element () =
     let field = random_key () in
@@ -1202,8 +1099,7 @@ let test_hset () =
   Alcotest.(check ie) "Set multiple elements" (Ok 3) res;
   return ()
 
-let test_hget () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hget conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1213,8 +1109,7 @@ let test_hget () =
   Alcotest.(check se) "Getting the value that was set" (Ok value) res;
   return ()
 
-let test_hmget () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hmget conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1228,8 +1123,7 @@ let test_hmget () =
   Alcotest.(check sme) "Getting the value that was set" (Ok expected) res;
   return ()
 
-let test_hgetall () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hgetall conn =
   let key = random_key () in
   let%bind res = Orewa.hgetall conn key in
   let expected = String.Map.of_alist_exn [] in
@@ -1243,8 +1137,7 @@ let test_hgetall () =
   Alcotest.(check sme) "Getting a map of elements" (Ok expected) res;
   return ()
 
-let test_hdel () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hdel conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1262,8 +1155,7 @@ let test_hdel () =
   Alcotest.(check ie) "Single delete from filled hashtable" (Ok 2) res;
   return ()
 
-let test_hexists () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hexists conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1278,8 +1170,7 @@ let test_hexists () =
   Alcotest.(check be) "Asking for deleted key" (Ok false) res;
   return ()
 
-let test_hincrby () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hincrby conn =
   let key = random_key () in
   let field = random_key () in
   let value = 42 in
@@ -1289,8 +1180,7 @@ let test_hincrby () =
   Alcotest.(check ie) "Incrementing existing key" (Ok (2 * value)) res;
   return ()
 
-let test_hincrbyfloat () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hincrbyfloat conn =
   let key = random_key () in
   let field = random_key () in
   let value = 42. in
@@ -1300,8 +1190,7 @@ let test_hincrbyfloat () =
   Alcotest.(check fe) "Incrementing existing key" (Ok Float.(2. * value)) res;
   return ()
 
-let test_hkeys () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hkeys conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1313,8 +1202,7 @@ let test_hkeys () =
   Alcotest.(check sle) "Enumerating existing key" (Ok [field]) res;
   return ()
 
-let test_hvals () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hvals conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1326,8 +1214,7 @@ let test_hvals () =
   Alcotest.(check sle) "Enumerating existing key" (Ok [value]) res;
   return ()
 
-let test_hlen () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hlen conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1339,8 +1226,7 @@ let test_hlen () =
   Alcotest.(check ie) "Map with fields" (Ok 1) res;
   return ()
 
-let test_hstrlen () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hstrlen conn =
   let key = random_key () in
   let field = random_key () in
   let value = random_key () in
@@ -1352,8 +1238,7 @@ let test_hstrlen () =
   Alcotest.(check ie) "Map with a field" (Ok (String.length value)) res;
   return ()
 
-let test_hscan () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_hscan conn =
   let key = random_key () in
   let count = 20 in
   let elements =
@@ -1371,101 +1256,104 @@ let test_hscan () =
     res;
   return ()
 
-let test_publish () =
-  Orewa.with_connection ~host @@ fun conn ->
+let test_publish conn =
   let key = random_key () in
   let%bind res = Orewa.publish conn ~channel:key "aaaa" in
   Alcotest.(check ie) "PUBLISH failed" (Ok 0) res;
   return ()
 
 let tests =
-  Alcotest_async.
-    [ test_case "ECHO" `Slow test_echo;
-      test_case "SET" `Slow test_set;
-      test_case "GET" `Slow test_get;
-      test_case "MGET" `Slow test_mget;
-      test_case "MSET" `Slow test_mset;
-      test_case "MSETNX" `Slow test_msetnx;
-      test_case "GETRANGE" `Slow test_getrange;
-      test_case "Large SET/GET" `Slow test_large_set_get;
-      test_case "RPOPLPUSH" `Slow test_rpoplpush;
-      test_case "SET with expiry" `Slow test_set_expiry;
-      test_case "LPUSH" `Slow test_lpush;
-      test_case "RPUSH" `Slow test_rpush;
-      test_case "LPOP" `Slow test_lpop;
-      test_case "RPOP" `Slow test_rpop;
-      test_case "LRANGE" `Slow test_lpush_lrange;
-      test_case "LREM" `Slow test_lrem;
-      test_case "LSET" `Slow test_lset;
-      test_case "LTRIM" `Slow test_ltrim;
-      test_case "Large LRANGE" `Slow test_large_lrange;
-      test_case "APPEND" `Slow test_append;
-      test_case "AUTH" `Slow test_auth;
-      test_case "BGREWRITEAOF" `Slow test_bgrewriteaof;
-      test_case "BGSAVE" `Slow test_bgsave;
-      test_case "BITCOUNT" `Slow test_bitcount;
-      test_case "BITFIELD" `Slow test_bitfield;
-      test_case "BITOP" `Slow test_bitop;
-      test_case "BITPOS" `Slow test_bitpos;
-      test_case "GETBIT" `Slow test_getbit;
-      test_case "GETSET" `Slow test_getset;
-      test_case "STRLEN" `Slow test_strlen;
-      test_case "SETBIT" `Slow test_setbit;
-      test_case "DECR" `Slow test_decr;
-      test_case "DECRBY" `Slow test_decrby;
-      test_case "INCR" `Slow test_incr;
-      test_case "INCRBY" `Slow test_incrby;
-      test_case "INCRBYFLOAT" `Slow test_incrbyfloat;
-      test_case "SELECT" `Slow test_select;
-      test_case "DEL" `Slow test_del;
-      test_case "EXISTS" `Slow test_exists;
-      test_case "EXPIRE" `Slow test_expire;
-      test_case "EXPIREAT" `Slow test_expireat;
-      test_case "KEYS" `Slow test_keys;
-      test_case "SADD" `Slow test_sadd;
-      test_case "SCARD" `Slow test_scard;
-      test_case "SDIFF" `Slow test_sdiff;
-      test_case "SDIFFSTORE" `Slow test_sdiffstore;
-      test_case "SINTER" `Slow test_sinter;
-      test_case "SINTERSTORE" `Slow test_sinterstore;
-      test_case "SISMEMBER" `Slow test_sismember;
-      test_case "SMEMBERS" `Slow test_smembers;
-      test_case "SPOP" `Slow test_spop;
-      test_case "SRANDMEMBER" `Slow test_srandmember;
-      test_case "SREM" `Slow test_srem;
-      test_case "SUNION" `Slow test_sunion;
-      test_case "SUNIONSTORE" `Slow test_sunionstore;
-      test_case "SSCAN" `Slow test_sscan;
-      test_case "SCAN" `Slow test_scan;
-      test_case "MOVE" `Slow test_move;
-      test_case "PERSIST" `Slow test_persist;
-      test_case "RANDOMKEY" `Slow test_randomkey;
-      test_case "RENAME" `Slow test_rename;
-      test_case "RENAMENX" `Slow test_renamenx;
-      test_case "SORT" `Slow test_sort;
-      test_case "TTL" `Slow test_ttl;
-      test_case "TYPE" `Slow test_type';
-      test_case "DUMP" `Slow test_dump;
-      test_case "RESTORE" `Slow test_restore;
-      test_case "PIPELINE" `Slow test_pipelining;
-      test_case "CLOSE" `Slow test_close;
-      test_case "LINSERT" `Slow test_linsert;
-      test_case "LLEN" `Slow test_llen;
-      test_case "LINDEX" `Slow test_lindex;
-      test_case "HSET" `Slow test_hset;
-      test_case "HGET" `Slow test_hget;
-      test_case "HMGET" `Slow test_hmget;
-      test_case "HGETALL" `Slow test_hgetall;
-      test_case "HDEL" `Slow test_hdel;
-      test_case "HEXISTS" `Slow test_hexists;
-      test_case "HINCRBY" `Slow test_hincrby;
-      test_case "HINCRBYFLOAT" `Slow test_hincrbyfloat;
-      test_case "HKEYS" `Slow test_hkeys;
-      test_case "HVALS" `Slow test_hvals;
-      test_case "HLEN" `Slow test_hlen;
-      test_case "HSTRLEN" `Slow test_hstrlen;
-      test_case "HSCAN" `Slow test_hscan;
-      test_case "PUBLISH" `Slow test_publish ]
+  let open Alcotest_async in
+  let test_case name speed f =
+    test_case name speed (fun () -> wc f) in
+  [
+    test_case "ECHO" `Slow test_echo;
+    test_case "SET" `Slow test_set;
+    test_case "GET" `Slow test_get;
+    test_case "MGET" `Slow test_mget;
+    test_case "MSET" `Slow test_mset;
+    test_case "MSETNX" `Slow test_msetnx;
+    test_case "GETRANGE" `Slow test_getrange;
+    test_case "Large SET/GET" `Slow test_large_set_get;
+    test_case "RPOPLPUSH" `Slow test_rpoplpush;
+    test_case "SET with expiry" `Slow test_set_expiry;
+    test_case "LPUSH" `Slow test_lpush;
+    test_case "RPUSH" `Slow test_rpush;
+    test_case "LPOP" `Slow test_lpop;
+    test_case "RPOP" `Slow test_rpop;
+    test_case "LRANGE" `Slow test_lpush_lrange;
+    test_case "LREM" `Slow test_lrem;
+    test_case "LSET" `Slow test_lset;
+    test_case "LTRIM" `Slow test_ltrim;
+    test_case "Large LRANGE" `Slow test_large_lrange;
+    test_case "APPEND" `Slow test_append;
+    test_case "AUTH" `Slow test_auth;
+    test_case "BGREWRITEAOF" `Slow test_bgrewriteaof;
+    test_case "BGSAVE" `Slow test_bgsave;
+    test_case "BITCOUNT" `Slow test_bitcount;
+    test_case "BITFIELD" `Slow test_bitfield;
+    test_case "BITOP" `Slow test_bitop;
+    test_case "BITPOS" `Slow test_bitpos;
+    test_case "GETBIT" `Slow test_getbit;
+    test_case "GETSET" `Slow test_getset;
+    test_case "STRLEN" `Slow test_strlen;
+    test_case "SETBIT" `Slow test_setbit;
+    test_case "DECR" `Slow test_decr;
+    test_case "DECRBY" `Slow test_decrby;
+    test_case "INCR" `Slow test_incr;
+    test_case "INCRBY" `Slow test_incrby;
+    test_case "INCRBYFLOAT" `Slow test_incrbyfloat;
+    test_case "SELECT" `Slow test_select;
+    test_case "DEL" `Slow test_del;
+    test_case "EXISTS" `Slow test_exists;
+    test_case "EXPIRE" `Slow test_expire;
+    test_case "EXPIREAT" `Slow test_expireat;
+    test_case "KEYS" `Slow test_keys;
+    test_case "SADD" `Slow test_sadd;
+    test_case "SCARD" `Slow test_scard;
+    test_case "SDIFF" `Slow test_sdiff;
+    test_case "SDIFFSTORE" `Slow test_sdiffstore;
+    test_case "SINTER" `Slow test_sinter;
+    test_case "SINTERSTORE" `Slow test_sinterstore;
+    test_case "SISMEMBER" `Slow test_sismember;
+    test_case "SMEMBERS" `Slow test_smembers;
+    test_case "SPOP" `Slow test_spop;
+    test_case "SRANDMEMBER" `Slow test_srandmember;
+    test_case "SREM" `Slow test_srem;
+    test_case "SUNION" `Slow test_sunion;
+    test_case "SUNIONSTORE" `Slow test_sunionstore;
+    test_case "SSCAN" `Slow test_sscan;
+    test_case "SCAN" `Slow test_scan;
+    test_case "MOVE" `Slow test_move;
+    test_case "PERSIST" `Slow test_persist;
+    test_case "RANDOMKEY" `Slow test_randomkey;
+    test_case "RENAME" `Slow test_rename;
+    test_case "RENAMENX" `Slow test_renamenx;
+    test_case "SORT" `Slow test_sort;
+    test_case "TTL" `Slow test_ttl;
+    test_case "TYPE" `Slow test_typ;
+    test_case "DUMP" `Slow test_dump;
+    test_case "RESTORE" `Slow test_restore;
+    test_case "PIPELINE" `Slow test_pipelining;
+    (* test_case "CLOSE" `Slow test_close; *)
+    test_case "LINSERT" `Slow test_linsert;
+    test_case "LLEN" `Slow test_llen;
+    test_case "LINDEX" `Slow test_lindex;
+    test_case "HSET" `Slow test_hset;
+    test_case "HGET" `Slow test_hget;
+    test_case "HMGET" `Slow test_hmget;
+    test_case "HGETALL" `Slow test_hgetall;
+    test_case "HDEL" `Slow test_hdel;
+    test_case "HEXISTS" `Slow test_hexists;
+    test_case "HINCRBY" `Slow test_hincrby;
+    test_case "HINCRBYFLOAT" `Slow test_hincrbyfloat;
+    test_case "HKEYS" `Slow test_hkeys;
+    test_case "HVALS" `Slow test_hvals;
+    test_case "HLEN" `Slow test_hlen;
+    test_case "HSTRLEN" `Slow test_hstrlen;
+    test_case "HSCAN" `Slow test_hscan;
+    test_case "PUBLISH" `Slow test_publish
+  ]
 
 let () =
   Log.Global.set_level `Debug;
