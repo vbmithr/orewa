@@ -1,3 +1,4 @@
+open Core
 open Async
 
 type t
@@ -21,14 +22,13 @@ val echo         : t -> string -> string Deferred.Or_error.t
 val append       : t -> string -> string -> int Deferred.Or_error.t
 val bitcount     : t -> ?range:(int * int) -> string -> int Deferred.Or_error.t
 
-(* val set : t -> key:string ->
- *   ?expire:Time_ns.Span.t ->
- *   ?exist:[`Always | `Not_if_exists | `Only_if_exists] ->
- *   string -> bool Deferred.Or_error.t
- * 
- * val get : t -> string -> string option Deferred.Or_error.t
- * 
- * val getrange : t -> start:int -> stop:int -> string -> string Deferred.Or_error.t
+val set : t ->
+  ?expire:Time_ns.Span.t -> ?flag:[`IfExists|`IfNotExists] ->
+  string -> string -> bool Deferred.Or_error.t
+
+val get : t -> string -> string option Deferred.Or_error.t
+
+(* val getrange : t -> start:int -> stop:int -> string -> string Deferred.Or_error.t
  * val getset : t -> key:string -> string -> string option Deferred.Or_error.t
  * 
  * val strlen : t -> string -> int Deferred.Or_error.t

@@ -1,5 +1,4 @@
-(executable
- (name pipeline_read)
- (preprocess
-  (pps ppx_let))
+(executables
+ (public_names pipeline_read pubsub)
+ (preprocess (pps ppx_jane))
  (libraries core async orewa))

@@ -34,12 +34,12 @@ module Resp = struct
    *   | Bulk s -> Ok (Some s)
    *   | Null -> Ok None
    *   | Error e -> Error e
-   *   | _ -> assert false
-   * let null_string_or_error = function
-   *   | String s -> Ok (Some s)
-   *   | Null -> Ok None
-   *   | Error e -> Error e
    *   | _ -> assert false *)
+  let null_string_or_error = function
+    | String s -> Ok (Some s)
+    | Null -> Ok None
+    | Error e -> Error e
+    | _ -> assert false
   let int_or_error = function
     | Integer s -> Ok s
     | Error e -> Error e
@@ -109,9 +109,11 @@ type _ typ =
   | Unit : unit typ
   | Int : int typ
   | String : string typ
+  | StringOrNull : string option typ
 
 let int = Int
 let string = String
+let string_or_null = StringOrNull
 
 type _ cmd =
   | Subscribe : string list -> unit cmd
@@ -123,6 +125,10 @@ type _ cmd =
   | Echo : string -> string cmd
   | Append : { key: string; value: string } -> int cmd
   | Bitcount : { key: string; range: (int * int) option } -> int cmd
+  | Set : { key: string; value: string;
+            expire: Time_ns.Span.t option;
+            flag: [`IfExists|`IfNotExists] option } -> string option cmd
+  | Get : string -> string cmd
 
 let echo msg = Echo msg
 let publish chn msg = Publish (chn, msg)
@@ -132,6 +138,17 @@ let subscribe chns = Subscribe chns
 let unsubscribe chns = Unsubscribe chns
 let psubscribe pat = PSubscribe pat
 let punsubscribe pat = PUnsubscribe pat
+let set ?expire ?flag key value = Set { key; value; expire; flag }
+let get key = Get key
+
+let resp_of_expire t =
+  let open Time_ns.Span in
+  if t > of_int_sec 1 then Printf.ksprintf Resp.bulk "EX %d" (to_int_sec t)
+  else Printf.ksprintf Resp.bulk "PX %d" (to_int_ms t)
+
+let resp_of_flag = function
+  | `IfExists -> Resp.bulk "XX"
+  | `IfNotExists -> Resp.bulk "NX"
 
 let resp_of_cmd : type a. a cmd -> Resp.t = function
   | Echo msg -> Array [Bulk "ECHO"; Bulk msg]
@@ -142,11 +159,18 @@ let resp_of_cmd : type a. a cmd -> Resp.t = function
   | Publish (chn, msg) -> Array [Bulk "PUBLISH"; Bulk chn; Bulk msg]
 
   | Append { key; value } ->  Array [Bulk "APPEND"; Bulk key; Bulk value]
-  | Bitcount { key; range } ->
+  | Bitcount { key; range } -> begin
     match range with
     | None -> Array [Bulk "BITCOUNT"; Bulk key]
     | Some (start, stop) ->
       Array [Bulk "BITCOUNT"; Bulk key; Bulk (string_of_int start); Bulk (string_of_int stop)]
+  end
+  | Set { key; value; expire; flag } ->
+    Resp.array (List.filter_opt [
+        Some (Resp.bulk "SET"); Some (Resp.bulk key); Some (Resp.bulk value);
+        Option.map ~f:resp_of_expire expire; Option.map ~f:resp_of_flag flag])
+  | Get key -> Array [Bulk "GET"; Bulk key
+]
 
 let connection_closed = Error.of_string "Connection closed"
 
@@ -205,6 +229,7 @@ let create r w =
             | None, Unit -> ()
             | Some ivar, Int -> Ivar.fill ivar (Resp.int_or_error msg)
             | Some ivar, String -> Ivar.fill ivar (Resp.string_or_error msg)
+            | Some ivar, StringOrNull -> Ivar.fill ivar (Resp.null_string_or_error msg)
             | _ -> assert false
           end ;
           recv_loop reader in
@@ -248,28 +273,15 @@ let unsubscribe t chns = dispatch_async t (unsubscribe chns)
 let psubscribe t pat = dispatch_async t (psubscribe pat)
 let punsubscribe t pat = dispatch_async t (punsubscribe pat)
 
-(* let set t ~key ?expire ?(exist = `Always) value =
- *   let expiry = match expire with
- *     | None -> []
- *     | Some span -> ["PX"; span |> Time_ns.Span.to_ms |> int_of_float |> string_of_int] in
- *   let existence =
- *     match exist with
- *     | `Always -> []
- *     | `Not_if_exists -> ["NX"]
- *     | `Only_if_exists -> ["XX"] in
- *   let command = ["SET"; key; value] @ expiry @ existence in
- *   request_null_string t command >>|? function
- *   | Some _ -> true
- *   | None -> false
- * 
- * let get t key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["GET"; key] with
- *   | Resp.Bulk v -> return @@ Some v
- *   | Resp.Null -> return @@ None
- *   | _ -> assert false
- * 
- * let getrange t ~start ~stop key =
+let set t ?expire ?flag key value =
+  dispatch t string_or_null (set ?expire ?flag key value) >>|? function
+  | Some _ -> true
+  | None -> false
+let get t key = dispatch t string (get key) >>|? function
+  | "nil" -> None
+  | value -> Some value
+
+(* let getrange t ~start ~stop key =
  *   request_bulk t ["GETRANGE"; key; string_of_int start; string_of_int stop]
  * 
  * let getset t ~key value =
