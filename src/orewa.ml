@@ -1,6 +1,9 @@
 open Core
 open Async
 
+let src = Logs.Src.create ~doc:"OCaml/Redis interface" "orewa"
+module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
+
 module Resp = struct
   type t =
     | String of string
@@ -213,41 +216,52 @@ let pubsub { pubsub; _ } = pubsub
 let create r w =
   let waiters = (Queue.create () : waiter Queue.t) in
   let pubsub, pubsub_w = Pipe.create () in
-  let rec recv_loop reader =
-    Resp.read reader >>= function
-    | `Eof -> Deferred.unit
+  let rec recv_loop () =
+    Log_async.debug (fun m -> m "before recv_loop") >>= fun () ->
+    Resp.read r >>= function
+    | `Eof ->
+      Log_async.debug (fun m -> m "recv_loop eof") >>= fun () ->
+      Deferred.unit
     | `Ok msg ->
+      Log_async.debug (fun m -> m "recv_loop %a" Resp.pp msg) >>= fun () ->
       match pubsub_of_resp msg with
       | Some msg -> Pipe.write pubsub_w msg
       | None ->
         match Queue.dequeue waiters with
-        | None when Reader.is_closed reader -> Deferred.unit
+        | None when Reader.is_closed r -> Deferred.unit
         | None -> Format.kasprintf failwith "No waiters are waiting for this message: %a" Resp.pp msg
         | Some (Packed_w { ivar ; typ }) ->
+          Log_async.debug (fun m -> m "PROCESSING MSG") >>= fun () ->
           begin
             match ivar, typ with
             | None, Unit -> ()
             | Some ivar, Int -> Ivar.fill ivar (Resp.int_or_error msg)
             | Some ivar, String -> Ivar.fill ivar (Resp.string_or_error msg)
             | Some ivar, StringOrNull -> Ivar.fill ivar (Resp.null_string_or_error msg)
-            | _ -> assert false
+            | _ -> invalid_arg "BLEHHHH"
           end ;
-          recv_loop reader in
+          Log_async.debug (fun m -> m "After processing, reader is closed = %b" (Reader.is_closed r)) >>= fun () ->
+          recv_loop () in
   (* Requests are posted to a pipe, and requests are processed in sequence *)
   let handle_request (Packed_req { cmd; ivar; typ }) =
+    Log_async.debug (fun m -> m "HANDLE REQUEST") >>| fun () ->
     Queue.enqueue waiters (waiter ivar typ) ;
     Writer.write w (Resp.to_string (resp_of_cmd cmd)) in
   let request_writer = Pipe.create_writer begin fun pr ->
-      Pipe.iter_without_pushback pr ~f:handle_request >>= fun () ->
+      don't_wait_for (Pipe.closed pr >>= fun () ->
+                      Log_async.debug (fun m -> m "Close finished!!")) ;
+      Pipe.iter pr ~f:handle_request >>= fun () ->
+      Log_async.debug (fun m -> m "AFTER ITER") >>= fun () ->
       Writer.close w >>= fun () ->
       Reader.close r >>= fun () ->
       (* Signal this to all waiters. As the pipe has been closed, we
          know that no new waiters will arrive *)
+      Log_async.debug (fun m -> m "PUSH CONN CLOSED") >>= fun () ->
       Queue.iter waiters ~f:(fun waiter -> signal_error waiter connection_closed);
       return @@ Queue.clear waiters
     end in
   (* Start redis receiver. Processing ends if the connection is closed. *)
-  (recv_loop r >>> fun () -> Pipe.close request_writer) ;
+  (recv_loop () >>> fun () -> Pipe.close request_writer) ;
   (* Start processing requests. Once the pipe is closed, we signal
      closed to all outstanding waiters after closing the underlying
      socket *)
