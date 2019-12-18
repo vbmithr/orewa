@@ -8,7 +8,7 @@ module Resp = struct
   type t =
     | String of string
     | Error of Error.t
-    | Integer of int
+    | Int of int
     | Bulk of string
     | Array of t list
     | Null
@@ -16,7 +16,7 @@ module Resp = struct
   let string s = String s
   (* let error e = Error e *)
   let error_string s = Error (Error.of_string s)
-  let int i = Integer i
+  let int i = Int i
   let bulk s = Bulk s
   let array a = Array a
   let null = Null
@@ -29,11 +29,11 @@ module Resp = struct
     | String s -> Ok s
     | Error e -> Error e
     | _ -> assert false
-  (* let bulk_or_error = function
-   *   | Bulk s -> Ok s
-   *   | Error e -> Error e
-   *   | _ -> assert false
-   * let null_bulk_or_error = function
+  let bulk_or_error = function
+    | Bulk s -> Ok s
+    | Error e -> Error e
+    | _ -> assert false
+  (* let null_bulk_or_error = function
    *   | Bulk s -> Ok (Some s)
    *   | Null -> Ok None
    *   | Error e -> Error e
@@ -44,14 +44,14 @@ module Resp = struct
     | Error e -> Error e
     | _ -> assert false
   let int_or_error = function
-    | Integer s -> Ok s
+    | Int s -> Ok s
     | Error e -> Error e
     | _ -> assert false
 
   let rec pp ppf = function
     | Error e   -> Format.fprintf ppf "-%a\r\n" Error.pp e
     | String s  -> Format.fprintf ppf "+%s\r\n" s
-    | Integer n -> Format.fprintf ppf ":%d\r\n" n
+    | Int n     -> Format.fprintf ppf ":%d\r\n" n
     | Bulk s    -> Format.fprintf ppf "$%d\r\n%s\r\n" (String.length s) s
     | Array xs  -> Format.fprintf ppf "*%d\r\n%a" (List.length xs) (Format.pp_print_list ~pp_sep:(fun _ () -> ()) pp) xs
     | Null      -> Format.fprintf ppf "$-1\r\n"
@@ -109,21 +109,31 @@ module Resp = struct
 end
 
 type _ typ =
-  | Unit : unit typ
   | Int : int typ
   | String : string typ
   | StringOrNull : string option typ
+  | Bulk : string typ
+  (* | BulkOrNull : string option typ *)
 
 let int = Int
 let string = String
 let string_or_null = StringOrNull
+let bulk = Bulk
+(* let bulk_or_null = BulkOrNull *)
+
+type sub_cmd =
+  | Subscribe of string list
+  | Unsubscribe of string list
+  | PSubscribe of string
+  | PUnsubscribe of string
+
+let resp_of_sub_cmd = function
+  | Subscribe chns -> Resp.Array (Bulk "SUBSCRIBE" :: List.map ~f:Resp.bulk chns)
+  | Unsubscribe chns -> Array (Bulk "UNSUBSCRIBE" :: List.map ~f:Resp.bulk chns)
+  | PSubscribe pat -> Array [Bulk "PSUBSCRIBE"; Bulk pat]
+  | PUnsubscribe pat -> Array [Bulk "PUNSUBSCRIBE"; Bulk pat]
 
 type _ cmd =
-  | Subscribe : string list -> unit cmd
-  | Unsubscribe : string list -> unit cmd
-  | PSubscribe : string -> unit cmd
-  | PUnsubscribe : string -> unit cmd
-
   | Publish : string * string -> int cmd
   | Echo : string -> string cmd
   | Append : { key: string; value: string } -> int cmd
@@ -132,6 +142,7 @@ type _ cmd =
             expire: Time_ns.Span.t option;
             flag: [`IfExists|`IfNotExists] option } -> string option cmd
   | Get : string -> string cmd
+  (* | Quit : string cmd *)
 
 let echo msg = Echo msg
 let publish chn msg = Publish (chn, msg)
@@ -154,26 +165,23 @@ let resp_of_flag = function
   | `IfNotExists -> Resp.bulk "NX"
 
 let resp_of_cmd : type a. a cmd -> Resp.t = function
+  (* | Quit -> Array [Bulk "QUIT"] *)
   | Echo msg -> Array [Bulk "ECHO"; Bulk msg]
-  | Subscribe chns -> Array (Bulk "SUBSCRIBE" :: List.map ~f:Resp.bulk chns)
-  | Unsubscribe chns -> Array (Bulk "UNSUBSCRIBE" :: List.map ~f:Resp.bulk chns)
-  | PSubscribe pat -> Array [Bulk "PSUBSCRIBE"; Bulk pat]
-  | PUnsubscribe pat -> Array [Bulk "PUNSUBSCRIBE"; Bulk pat]
   | Publish (chn, msg) -> Array [Bulk "PUBLISH"; Bulk chn; Bulk msg]
 
   | Append { key; value } ->  Array [Bulk "APPEND"; Bulk key; Bulk value]
   | Bitcount { key; range } -> begin
-    match range with
-    | None -> Array [Bulk "BITCOUNT"; Bulk key]
-    | Some (start, stop) ->
-      Array [Bulk "BITCOUNT"; Bulk key; Bulk (string_of_int start); Bulk (string_of_int stop)]
-  end
+      match range with
+      | None -> Array [Bulk "BITCOUNT"; Bulk key]
+      | Some (start, stop) ->
+        Array [Bulk "BITCOUNT"; Bulk key; Bulk (string_of_int start); Bulk (string_of_int stop)]
+    end
   | Set { key; value; expire; flag } ->
     Resp.array (List.filter_opt [
         Some (Resp.bulk "SET"); Some (Resp.bulk key); Some (Resp.bulk value);
         Option.map ~f:resp_of_expire expire; Option.map ~f:resp_of_flag flag])
   | Get key -> Array [Bulk "GET"; Bulk key
-]
+                     ]
 
 let connection_closed = Error.of_string "Connection closed"
 
@@ -195,68 +203,97 @@ type pubsub =
   | Subscribe of { chn: string; nbSubscribed: int }
   | Unsubscribe of { chn: string; nbSubscribed: int }
   | Message of { chn: string; msg: string }
+  | Pong of string option
+  | Exit
 
 let pubsub_of_resp = function
-  | Resp.Array [Bulk "subscribe"; Bulk chn; Bulk nb] ->
-    Some (Subscribe { chn; nbSubscribed = (int_of_string nb) })
-  | Array [Bulk "unsubscribe"; Bulk chn; Bulk nb] ->
-    Some (Unsubscribe { chn; nbSubscribed = (int_of_string nb) })
+  | Resp.Array [Bulk "subscribe"; Bulk chn; Int nbSubscribed] ->
+    Some (Subscribe { chn; nbSubscribed })
+  | Array [Bulk "unsubscribe"; Bulk chn; Int nbSubscribed] ->
+    Some (Unsubscribe { chn; nbSubscribed })
   | Array [Bulk "message"; Bulk chn; Bulk msg] ->
     Some (Message { chn; msg })
+  | String "OK" -> Some Exit
+  | String "PONG" -> Some (Pong None)
+  | String s -> Some (Pong (Some s))
   | _ -> None
 
-type t = {
-  waiters : waiter Queue.t ;
-  writer  : request Pipe.Writer.t ;
+type sub = {
+  writer  : sub_cmd Pipe.Writer.t ;
   pubsub  : pubsub Pipe.Reader.t ;
 }
 
 let pubsub { pubsub; _ } = pubsub
 
-let create r w =
-  let waiters = (Queue.create () : waiter Queue.t) in
+type t = {
+  waiters : waiter Queue.t ;
+  writer  : request Pipe.Writer.t ;
+}
+
+let create_sub r w =
   let pubsub, pubsub_w = Pipe.create () in
   let rec recv_loop () =
-    Log_async.debug (fun m -> m "before recv_loop") >>= fun () ->
-    Resp.read r >>= function
-    | `Eof ->
-      Log_async.debug (fun m -> m "recv_loop eof") >>= fun () ->
+    Monitor.try_with (fun () -> Resp.read r) >>= function
+    | Error exn ->
+      Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
       Deferred.unit
-    | `Ok msg ->
-      Log_async.debug (fun m -> m "recv_loop %a" Resp.pp msg) >>= fun () ->
+    | Ok `Eof -> Deferred.unit
+    | Ok (`Ok msg) ->
       match pubsub_of_resp msg with
-      | Some msg -> Pipe.write pubsub_w msg
-      | None ->
-        match Queue.dequeue waiters with
-        | None when Reader.is_closed r -> Deferred.unit
-        | None -> Format.kasprintf failwith "No waiters are waiting for this message: %a" Resp.pp msg
-        | Some (Packed_w { ivar ; typ }) ->
-          Log_async.debug (fun m -> m "PROCESSING MSG") >>= fun () ->
-          begin
-            match ivar, typ with
-            | None, Unit -> ()
-            | Some ivar, Int -> Ivar.fill ivar (Resp.int_or_error msg)
-            | Some ivar, String -> Ivar.fill ivar (Resp.string_or_error msg)
-            | Some ivar, StringOrNull -> Ivar.fill ivar (Resp.null_string_or_error msg)
-            | _ -> invalid_arg "BLEHHHH"
-          end ;
-          Log_async.debug (fun m -> m "After processing, reader is closed = %b" (Reader.is_closed r)) >>= fun () ->
-          recv_loop () in
+      | None -> assert false
+      | Some msg ->
+        Pipe.write pubsub_w msg >>= fun () ->
+        recv_loop () in
+  let request_writer = Pipe.create_writer begin fun pr ->
+      Pipe.iter_without_pushback pr ~f:begin fun cmd ->
+        try Writer.write w (Resp.to_string (resp_of_sub_cmd cmd)) with _ -> ()
+      end
+    end in
+  (recv_loop () >>> fun () -> Pipe.close request_writer) ;
+  { writer = request_writer; pubsub }
+
+let dispatch_async ({ writer; _} : sub) msg =
+  Pipe.write writer msg
+
+let subscribe t chns = dispatch_async t (subscribe chns)
+let unsubscribe t chns = dispatch_async t (unsubscribe chns)
+let psubscribe t pat = dispatch_async t (psubscribe pat)
+let punsubscribe t pat = dispatch_async t (punsubscribe pat)
+
+let create r w =
+  let waiters = Queue.create () in
+  let rec recv_loop () =
+    Monitor.try_with (fun () -> Resp.read r) >>= function
+    | Error exn ->
+      Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
+      Deferred.unit
+    | Ok `Eof -> Deferred.unit
+    | Ok (`Ok msg) ->
+      match Queue.dequeue waiters with
+      | None when Reader.is_closed r -> Deferred.unit
+      | None -> Format.kasprintf failwith "No waiters are waiting for this message: %a" Resp.pp msg
+      | Some (Packed_w { ivar ; typ }) ->
+        begin
+          match ivar, typ with
+          | Some ivar, Int -> Ivar.fill ivar (Resp.int_or_error msg)
+          | Some ivar, String -> Ivar.fill ivar (Resp.string_or_error msg)
+          | Some ivar, StringOrNull -> Ivar.fill ivar (Resp.null_string_or_error msg)
+          | Some ivar, Bulk -> Ivar.fill ivar (Resp.bulk_or_error msg)
+          (* | Some ivar, BulkOrNull -> Ivar.fill ivar (Resp.null_bulk_or_error msg) *)
+          | _ -> assert false
+        end ;
+        recv_loop () in
   (* Requests are posted to a pipe, and requests are processed in sequence *)
   let handle_request (Packed_req { cmd; ivar; typ }) =
-    Log_async.debug (fun m -> m "HANDLE REQUEST") >>| fun () ->
     Queue.enqueue waiters (waiter ivar typ) ;
-    Writer.write w (Resp.to_string (resp_of_cmd cmd)) in
+    try Writer.write w (Resp.to_string (resp_of_cmd cmd)) with _ -> ()
+  in
   let request_writer = Pipe.create_writer begin fun pr ->
-      don't_wait_for (Pipe.closed pr >>= fun () ->
-                      Log_async.debug (fun m -> m "Close finished!!")) ;
-      Pipe.iter pr ~f:handle_request >>= fun () ->
-      Log_async.debug (fun m -> m "AFTER ITER") >>= fun () ->
+      Pipe.iter_without_pushback pr ~f:handle_request >>= fun () ->
       Writer.close w >>= fun () ->
       Reader.close r >>= fun () ->
       (* Signal this to all waiters. As the pipe has been closed, we
          know that no new waiters will arrive *)
-      Log_async.debug (fun m -> m "PUSH CONN CLOSED") >>= fun () ->
       Queue.iter waiters ~f:(fun waiter -> signal_error waiter connection_closed);
       return @@ Queue.clear waiters
     end in
@@ -265,7 +302,7 @@ let create r w =
   (* Start processing requests. Once the pipe is closed, we signal
      closed to all outstanding waiters after closing the underlying
      socket *)
-  { waiters; writer = request_writer; pubsub }
+  { waiters; writer = request_writer }
 
 let dispatch { writer; _ } typ cmd =
   let ivar = Ivar.create () in
@@ -273,25 +310,16 @@ let dispatch { writer; _ } typ cmd =
   Pipe.write writer req >>= fun () ->
   Ivar.read ivar
 
-let dispatch_async { writer; _ } cmd =
-  let req = Packed_req { ivar = None; typ = Unit; cmd } in
-  Pipe.write writer req
-
 let publish t chn msg = dispatch t int (publish chn msg)
 let echo t msg = dispatch t string (echo msg)
 let bitcount t ?range key = dispatch t int (bitcount ?range key)
 let append t key value = dispatch t int (append key value)
 
-let subscribe t chns = dispatch_async t (subscribe chns)
-let unsubscribe t chns = dispatch_async t (unsubscribe chns)
-let psubscribe t pat = dispatch_async t (psubscribe pat)
-let punsubscribe t pat = dispatch_async t (punsubscribe pat)
-
 let set t ?expire ?flag key value =
   dispatch t string_or_null (set ?expire ?flag key value) >>|? function
   | Some _ -> true
   | None -> false
-let get t key = dispatch t string (get key) >>|? function
+let get t key = dispatch t bulk (get key) >>|? function
   | "nil" -> None
   | value -> Some value
 

@@ -22,12 +22,13 @@ let endp = Host_and_port.create ~host:"localhost" ~port:6379
 
 let main nbIter =
   Tcp.with_connection (Tcp.Where_to_connect.of_host_and_port endp) begin fun _ r w ->
-    (Reader.close_finished r >>> fun () -> printf "CLOSED!!!\n%!") ;
     let conn = Orewa.create r w in
     Log_async.debug (fun m -> m "set key %s" key) >>= fun () ->
-    Orewa.set conn key "test" >>|? fun b ->
+    Deferred.Or_error.return true >>=? fun _b ->
+    Orewa.set conn key "test" >>=? fun b ->
     Log_async.debug (fun m -> m "key %s set (%b)" key b) >>= fun () ->
-    Deferred.List.init ~how:`Parallel nbIter ~f:(fun _ -> req conn)
+    Deferred.List.init ~how:`Parallel nbIter ~f:(fun _ -> req conn) >>= fun _ ->
+    Deferred.Or_error.return ()
   end
 
 let () =
@@ -40,9 +41,7 @@ let () =
       fun () ->
         main nbIter >>= function
         | Error e -> Error.raise e
-        | Ok _ ->
-          printf "OUT OF LOOP\n%!" ;
-          Deferred.unit
+        | Ok _ -> Deferred.unit
     ] end
   |> Command.run
 
