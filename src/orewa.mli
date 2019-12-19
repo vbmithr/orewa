@@ -26,21 +26,35 @@ val echo         : t -> string -> string Deferred.Or_error.t
 val append       : t -> string -> string -> int Deferred.Or_error.t
 val bitcount     : t -> ?range:(int * int) -> string -> int Deferred.Or_error.t
 
-val set : t ->
-  ?expire:Time_ns.Span.t -> ?flag:[`IfExists|`IfNotExists] ->
-  string -> string -> bool Deferred.Or_error.t
-
 val get : t -> string -> string option Deferred.Or_error.t
+val set : t -> ?expire:Time_ns.Span.t -> ?flag:[`IfExists|`IfNotExists] -> string -> string -> bool Deferred.Or_error.t
 
-(* val getrange : t -> start:int -> stop:int -> string -> string Deferred.Or_error.t
- * val getset : t -> key:string -> string -> string option Deferred.Or_error.t
- * 
- * val strlen : t -> string -> int Deferred.Or_error.t
- * val mget : t -> string list -> string option list Deferred.Or_error.t
- * val mset : t -> (string * string) list -> unit Deferred.Or_error.t
- * val msetnx : t -> (string * string) list -> bool Deferred.Or_error.t
- * 
- * val lpush : t ->
+val mget : t -> string list -> string option list Deferred.Or_error.t
+val mset : t -> ?overwrite:bool -> (string * string) list -> bool Deferred.Or_error.t
+
+val getset : t -> string -> string -> string option Deferred.Or_error.t
+val getrange : t -> string -> int -> int -> string Deferred.Or_error.t
+
+val incr : t -> ?by:int -> string -> int Deferred.Or_error.t
+val incrbyfloat : t -> string -> float -> float Deferred.Or_error.t
+
+val strlen : t -> string -> int Deferred.Or_error.t
+
+val hset : t -> string -> (string * string) list -> int Deferred.Or_error.t
+val hget : t -> string -> string -> string option Deferred.Or_error.t
+val hmget : t -> string -> string list -> string option list Deferred.Or_error.t
+val hgetall : t -> string -> (string * string) list Deferred.Or_error.t
+val hdel :  t -> string -> string list -> int Deferred.Or_error.t
+val hexists : t -> string -> string -> bool Deferred.Or_error.t
+val hincrby : t -> string -> string -> int -> int Deferred.Or_error.t
+val hincrbyfloat : t -> string -> string -> float -> float Deferred.Or_error.t
+val hkeys : t -> string -> string list Deferred.Or_error.t
+val hvals : t -> string -> string list Deferred.Or_error.t
+val hlen : t -> string -> int Deferred.Or_error.t
+val hstrlen : t -> string -> string -> int Deferred.Or_error.t
+(* val hscan : t -> ?pattern:string -> ?count:int -> string -> (string * string) Pipe.Reader.t *)
+
+(* val lpush : t ->
  *   ?exist:[`Always | `Only_if_exists] ->
  *   element:string ->
  *   ?elements:string list ->
@@ -103,9 +117,6 @@ val get : t -> string -> string option Deferred.Or_error.t
  * 
  * val decr : t -> string -> int Deferred.Or_error.t
  * val decrby : t -> string -> int -> int Deferred.Or_error.t
- * val incr : t -> string -> int Deferred.Or_error.t
- * val incrby : t -> string -> int -> int Deferred.Or_error.t
- * val incrbyfloat : t -> string -> float -> float Deferred.Or_error.t
  * val select : t -> int -> unit Deferred.Or_error.t
  * val del : t -> ?keys:string list -> string -> int Deferred.Or_error.t
  * val exists : t -> ?keys:string list -> string -> int Deferred.Or_error.t
@@ -218,26 +229,4 @@ val get : t -> string -> string option Deferred.Or_error.t
  * val llen : t -> string -> int Deferred.Or_error.t
  * val lrem : t -> key:string -> int -> element:string -> int Deferred.Or_error.t
  * val lset : t -> key:string -> int -> element:string -> unit Deferred.Or_error.t
- * val ltrim : t -> start:int -> stop:int -> string -> unit Deferred.Or_error.t
- * 
- * val hset : t ->
- *   element:string * string ->
- *   ?elements:(string * string) list ->
- *   string ->
- *   int Deferred.Or_error.t
- * 
- * val hget : t -> field:string -> string -> string Deferred.Or_error.t
- * val hmget : t -> fields:string list -> string -> string String.Map.t Deferred.Or_error.t
- * val hgetall : t -> string -> string String.Map.t Deferred.Or_error.t
- * 
- * val hdel :  t -> ?fields:string list -> field:string -> string -> int Deferred.Or_error.t
- * val hexists : t -> field:string -> string -> bool Deferred.Or_error.t
- * val hincrby : t -> field:string -> string -> int -> int Deferred.Or_error.t
- * val hincrbyfloat : t -> field:string -> string -> float -> float Deferred.Or_error.t
- * val hkeys : t -> string -> string list Deferred.Or_error.t
- * val hvals : t -> string -> string list Deferred.Or_error.t
- * val hlen : t -> string -> int Deferred.Or_error.t
- * val hstrlen : t -> field:string -> string -> int Deferred.Or_error.t
- * val hscan : t -> ?pattern:string -> ?count:int -> string -> (string * string) Pipe.Reader.t
- * 
- * val publish : t -> channel:string -> string -> int Deferred.Or_error.t *)
+ * val ltrim : t -> start:int -> stop:int -> string -> unit Deferred.Or_error.t *)

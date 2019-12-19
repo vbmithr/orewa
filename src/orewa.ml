@@ -9,17 +9,18 @@ module Resp = struct
     | String of string
     | Error of Error.t
     | Int of int
-    | Bulk of string
+    | Bulk of string option
     | Array of t list
-    | Null
 
   let string s = String s
   (* let error e = Error e *)
   let error_string s = Error (Error.of_string s)
   let int i = Int i
-  let bulk s = Bulk s
+  let null = Bulk None
+  let bulk s = Bulk (Some s)
+  let bulk_of_int i = Bulk (Some (string_of_int i))
+  let bulk_of_float i = Bulk (Some (string_of_float i))
   let array a = Array a
-  let null = Null
 
   (* let get_bulk = function
    *   | Bulk s -> s
@@ -33,6 +34,14 @@ module Resp = struct
     | Bulk s -> Ok s
     | Error e -> Error e
     | _ -> assert false
+  let bulkarray_or_error = function
+    | Array a -> Ok (List.map a ~f:(function Bulk a -> a | _ -> assert false))
+    | Error e -> Error e
+    | _ -> assert false
+  let bulkarraynotnull_or_error = function
+    | Array a -> Ok (List.map a ~f:(function Bulk Some a -> a | _ -> assert false))
+    | Error e -> Error e
+    | _ -> assert false
   (* let null_bulk_or_error = function
    *   | Bulk s -> Ok (Some s)
    *   | Null -> Ok None
@@ -40,11 +49,19 @@ module Resp = struct
    *   | _ -> assert false *)
   let null_string_or_error = function
     | String s -> Ok (Some s)
-    | Null -> Ok None
+    | Bulk None -> Ok None
     | Error e -> Error e
     | _ -> assert false
   let int_or_error = function
     | Int s -> Ok s
+    | Error e -> Error e
+    | _ -> assert false
+  let bool_or_error = function
+    | Int 1 -> Ok true
+    | Int 0 -> Ok false
+    | _ -> assert false
+  let floatbulk_or_error = function
+    | Bulk (Some s) -> Ok (float_of_string s)
     | Error e -> Error e
     | _ -> assert false
 
@@ -52,9 +69,9 @@ module Resp = struct
     | Error e   -> Format.fprintf ppf "-%a\r\n" Error.pp e
     | String s  -> Format.fprintf ppf "+%s\r\n" s
     | Int n     -> Format.fprintf ppf ":%d\r\n" n
-    | Bulk s    -> Format.fprintf ppf "$%d\r\n%s\r\n" (String.length s) s
+    | Bulk None      -> Format.fprintf ppf "$-1\r\n"
+    | Bulk (Some s)    -> Format.fprintf ppf "$%d\r\n%s\r\n" (String.length s) s
     | Array xs  -> Format.fprintf ppf "*%d\r\n%a" (List.length xs) (Format.pp_print_list ~pp_sep:(fun _ () -> ()) pp) xs
-    | Null      -> Format.fprintf ppf "$-1\r\n"
 
   let to_string t = Format.asprintf "%a" pp t
 
@@ -110,16 +127,24 @@ end
 
 type _ typ =
   | Int : int typ
+  | Bool : bool typ
+  | Float : float typ
   | String : string typ
   | StringOrNull : string option typ
-  | Bulk : string typ
-  (* | BulkOrNull : string option typ *)
+  | Bulk : string option typ
+  | BulkNotNull : string typ
+  | BulkArray : string option list typ
+  | BulkArrayNotNull : string list typ
 
 let int = Int
+let bool = Bool
+let float = Float
 let string = String
 let string_or_null = StringOrNull
 let bulk = Bulk
-(* let bulk_or_null = BulkOrNull *)
+let bulknotnull = BulkNotNull
+let bulkarray = BulkArray
+let bulkarraynotnull = BulkArrayNotNull
 
 type sub_cmd =
   | Subscribe of string list
@@ -127,33 +152,50 @@ type sub_cmd =
   | PSubscribe of string
   | PUnsubscribe of string
 
-let resp_of_sub_cmd = function
-  | Subscribe chns -> Resp.Array (Bulk "SUBSCRIBE" :: List.map ~f:Resp.bulk chns)
-  | Unsubscribe chns -> Array (Bulk "UNSUBSCRIBE" :: List.map ~f:Resp.bulk chns)
-  | PSubscribe pat -> Array [Bulk "PSUBSCRIBE"; Bulk pat]
-  | PUnsubscribe pat -> Array [Bulk "PUNSUBSCRIBE"; Bulk pat]
+let resp_of_sub_cmd sub =
+  let open Resp in
+  match sub with
+  | Subscribe chns -> array (bulk "SUBSCRIBE" :: List.map ~f:Resp.bulk chns)
+  | Unsubscribe chns -> array (bulk "UNSUBSCRIBE" :: List.map ~f:Resp.bulk chns)
+  | PSubscribe pat -> array [bulk "PSUBSCRIBE"; bulk pat]
+  | PUnsubscribe pat -> array [bulk "PUNSUBSCRIBE"; bulk pat]
 
 type _ cmd =
   | Publish : string * string -> int cmd
   | Echo : string -> string cmd
   | Append : { key: string; value: string } -> int cmd
   | Bitcount : { key: string; range: (int * int) option } -> int cmd
-  | Set : { key: string; value: string;
+  | Set : { key: string;
+            value: string;
             expire: Time_ns.Span.t option;
             flag: [`IfExists|`IfNotExists] option } -> string option cmd
-  | Get : string -> string cmd
-  (* | Quit : string cmd *)
+  | Get : string -> string option cmd
+  | GetSet : string * string -> string option cmd
+  | GetRange : string * int * int -> string cmd
 
-let echo msg = Echo msg
-let publish chn msg = Publish (chn, msg)
-let bitcount ?range key = Bitcount { key; range }
-let append key value = Append { key; value }
-let subscribe chns = Subscribe chns
-let unsubscribe chns = Unsubscribe chns
-let psubscribe pat = PSubscribe pat
-let punsubscribe pat = PUnsubscribe pat
-let set ?expire ?flag key value = Set { key; value; expire; flag }
-let get key = Get key
+  | Incr : string -> int cmd
+  | IncrBy : string * int -> int cmd
+  | IncrByFloat : string * float -> float cmd
+  | Decr : string -> int cmd
+  | DecrBy : string * int -> int cmd
+  | StrLen : string -> int cmd
+  | MGet : string list -> string option list cmd
+  | MSet : (string * string) list -> string cmd
+  | MSetNX : (string * string) list -> int cmd
+
+  | HSet : string * (string * string) list -> int cmd
+  | HGet : string * string -> string option cmd
+  | HMGet : string * string list -> string option list cmd
+  | HGetAll : string -> string list cmd
+  | HDel : string * string list -> int cmd
+  | HExists : string * string -> bool cmd
+  | HIncrBy : string * string * int -> int cmd
+  | HIncrByFloat : string * string * float -> float cmd
+  | HKeys : string -> string list cmd
+  | HVals : string -> string list cmd
+  | HLen : string -> int cmd
+  | HStrLen : string * string -> int cmd
+  (* | Quit : string cmd *)
 
 let resp_of_expire t =
   let open Time_ns.Span in
@@ -164,24 +206,53 @@ let resp_of_flag = function
   | `IfExists -> Resp.bulk "XX"
   | `IfNotExists -> Resp.bulk "NX"
 
-let resp_of_cmd : type a. a cmd -> Resp.t = function
-  (* | Quit -> Array [Bulk "QUIT"] *)
-  | Echo msg -> Array [Bulk "ECHO"; Bulk msg]
-  | Publish (chn, msg) -> Array [Bulk "PUBLISH"; Bulk chn; Bulk msg]
+let concat_tuple kvs =
+  let open Resp in
+  List.(concat (map kvs ~f:(fun (k, v) -> [bulk k; bulk v])))
 
-  | Append { key; value } ->  Array [Bulk "APPEND"; Bulk key; Bulk value]
+let resp_of_cmd : type a. a cmd -> Resp.t = fun cmd ->
+  let open Resp in
+  match cmd with
+  (* | Quit -> Array [bulk "QUIT"] *)
+  | Echo msg -> array [bulk "ECHO"; bulk msg]
+  | Publish (chn, msg) -> array [bulk "PUBLISH"; bulk chn; bulk msg]
+
+  | Append { key; value } ->  array [bulk "APPEND"; bulk key; bulk value]
   | Bitcount { key; range } -> begin
       match range with
-      | None -> Array [Bulk "BITCOUNT"; Bulk key]
+      | None -> array [bulk "BITCOUNT"; bulk key]
       | Some (start, stop) ->
-        Array [Bulk "BITCOUNT"; Bulk key; Bulk (string_of_int start); Bulk (string_of_int stop)]
+        array [bulk "BITCOUNT"; bulk key; bulk_of_int start; bulk_of_int stop]
     end
   | Set { key; value; expire; flag } ->
     Resp.array (List.filter_opt [
         Some (Resp.bulk "SET"); Some (Resp.bulk key); Some (Resp.bulk value);
         Option.map ~f:resp_of_expire expire; Option.map ~f:resp_of_flag flag])
-  | Get key -> Array [Bulk "GET"; Bulk key
-                     ]
+  | Get key -> array [bulk "GET"; bulk key]
+  | MGet keys -> array ((bulk "MGET") :: List.map ~f:bulk keys)
+  | GetSet (key, v) -> array [bulk "GETSET"; bulk key; bulk v]
+  | GetRange (key, start, stop) ->
+    array [bulk "GETRANGE"; bulk key; bulk_of_int start; bulk_of_int stop]
+  | Incr key -> array [bulk "INCR"; bulk key]
+  | IncrBy (key, v) -> array [bulk "INCRBY"; bulk key; bulk_of_int v]
+  | IncrByFloat (key, v) -> array [bulk "INCRBY"; bulk key; bulk_of_float v]
+  | Decr key -> array [bulk "DECR"; bulk key]
+  | DecrBy (key, v) -> array [bulk "DECRBY"; bulk key; bulk_of_int v]
+  | StrLen key -> array [bulk "STRLEN"; bulk key]
+  | MSet kvs -> array (bulk "MSET" :: concat_tuple kvs)
+  | MSetNX kvs -> array (bulk "MSETNX" :: concat_tuple kvs)
+  | HSet (h, kvs) -> array (bulk "HSET" :: bulk h :: concat_tuple kvs)
+  | HGet (h, k) -> array [bulk "HGET"; bulk h; bulk k]
+  | HMGet (h, ks) -> array (bulk "HMGET" :: bulk h :: List.map ~f:bulk ks)
+  | HGetAll k -> array [bulk "HGETALL"; bulk k]
+  | HDel (h, ks) -> array (bulk "HDEL" :: bulk h :: List.map ~f:bulk ks)
+  | HExists (h, k) -> array [bulk "HEXISTS"; bulk h; bulk k]
+  | HIncrBy (h, k, v) -> array [bulk "HINCRBY"; bulk h; bulk k; bulk_of_int v]
+  | HIncrByFloat (h, k, v) -> array [bulk "HINCRBYFLOAT"; bulk h; bulk k; bulk_of_float v]
+  | HKeys h -> array [bulk "HKEYS"; bulk h]
+  | HVals h -> array [bulk "HKEYS"; bulk h]
+  | HLen h -> array [bulk "HLEN"; bulk h]
+  | HStrLen (h, k) -> array [bulk "HSTRLEN"; bulk h; bulk k]
 
 let connection_closed = Error.of_string "Connection closed"
 
@@ -206,12 +277,14 @@ type pubsub =
   | Pong of string option
   | Exit
 
-let pubsub_of_resp = function
-  | Resp.Array [Bulk "subscribe"; Bulk chn; Int nbSubscribed] ->
+let pubsub_of_resp resp =
+  let open Resp in
+  match resp with
+  | Array [Bulk Some "subscribe"; Bulk Some chn; Int nbSubscribed] ->
     Some (Subscribe { chn; nbSubscribed })
-  | Array [Bulk "unsubscribe"; Bulk chn; Int nbSubscribed] ->
+  | Array [Bulk Some "unsubscribe"; Bulk Some chn; Int nbSubscribed] ->
     Some (Unsubscribe { chn; nbSubscribed })
-  | Array [Bulk "message"; Bulk chn; Bulk msg] ->
+  | Array [Bulk Some "message"; Bulk Some chn; Bulk Some msg] ->
     Some (Message { chn; msg })
   | String "OK" -> Some Exit
   | String "PONG" -> Some (Pong None)
@@ -255,10 +328,10 @@ let create_sub r w =
 let dispatch_async ({ writer; _} : sub) msg =
   Pipe.write writer msg
 
-let subscribe t chns = dispatch_async t (subscribe chns)
-let unsubscribe t chns = dispatch_async t (unsubscribe chns)
-let psubscribe t pat = dispatch_async t (psubscribe pat)
-let punsubscribe t pat = dispatch_async t (punsubscribe pat)
+let subscribe t chns = dispatch_async t (Subscribe chns)
+let unsubscribe t chns = dispatch_async t (Unsubscribe chns)
+let psubscribe t pat = dispatch_async t (PSubscribe pat)
+let punsubscribe t pat = dispatch_async t (PUnsubscribe pat)
 
 let create r w =
   let waiters = Queue.create () in
@@ -275,12 +348,16 @@ let create r w =
       | Some (Packed_w { ivar ; typ }) ->
         begin
           match ivar, typ with
+          | None, _ -> assert false
+          | Some ivar, Bool -> Ivar.fill ivar (Resp.bool_or_error msg)
           | Some ivar, Int -> Ivar.fill ivar (Resp.int_or_error msg)
+          | Some ivar, Float -> Ivar.fill ivar (Resp.floatbulk_or_error msg)
           | Some ivar, String -> Ivar.fill ivar (Resp.string_or_error msg)
           | Some ivar, StringOrNull -> Ivar.fill ivar (Resp.null_string_or_error msg)
           | Some ivar, Bulk -> Ivar.fill ivar (Resp.bulk_or_error msg)
-          (* | Some ivar, BulkOrNull -> Ivar.fill ivar (Resp.null_bulk_or_error msg) *)
-          | _ -> assert false
+          | Some ivar, BulkNotNull -> Ivar.fill ivar (Or_error.map ~f:Caml.Option.get (Resp.bulk_or_error msg))
+          | Some ivar, BulkArray -> Ivar.fill ivar (Resp.bulkarray_or_error msg)
+          | Some ivar, BulkArrayNotNull -> Ivar.fill ivar (Resp.bulkarraynotnull_or_error msg)
         end ;
         recv_loop () in
   (* Requests are posted to a pipe, and requests are processed in sequence *)
@@ -310,65 +387,68 @@ let dispatch { writer; _ } typ cmd =
   Pipe.write writer req >>= fun () ->
   Ivar.read ivar
 
-let publish t chn msg = dispatch t int (publish chn msg)
-let echo t msg = dispatch t string (echo msg)
-let bitcount t ?range key = dispatch t int (bitcount ?range key)
-let append t key value = dispatch t int (append key value)
+let publish t chn msg = dispatch t int (Publish (chn, msg))
+let echo t msg = dispatch t bulknotnull (Echo msg)
+let bitcount t ?range key = dispatch t int (Bitcount { key; range })
+let append t key value = dispatch t int (Append { key; value })
+
+let get t key = dispatch t bulk (Get key)
+let mget t keys = dispatch t bulkarray (MGet keys)
+
+let mset t ?(overwrite=false) kvs =
+  match overwrite with
+  | true -> dispatch t string (MSet kvs) >>|? fun _ -> true
+  | false -> dispatch t int (MSetNX kvs) >>|? function 0 -> false | _ -> true
 
 let set t ?expire ?flag key value =
-  dispatch t string_or_null (set ?expire ?flag key value) >>|? function
+  dispatch t string_or_null (Set { expire; flag; key; value }) >>|? function
   | Some _ -> true
   | None -> false
-let get t key = dispatch t bulk (get key) >>|? function
-  | "nil" -> None
-  | value -> Some value
 
-(* let getrange t ~start ~stop key =
- *   request_bulk t ["GETRANGE"; key; string_of_int start; string_of_int stop]
- * 
- * let getset t ~key value =
- *   request_null_bulk t ["GETSET"; key; value]
- * 
- * let strlen t key =
- *   request_int t ["STRLEN"; key]
- * 
- * let mget t keys =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ("MGET" :: keys) with
- *   | Resp.Array xs ->
- *     return @@ List.fold_right xs ~init:[] ~f:begin fun item acc ->
- *       match item with
- *       | Resp.Null -> None :: acc
- *       | Resp.Bulk s -> Some s :: acc
- *       | _ -> assert false
- *     end
- *   | _ -> assert false
- * 
- * let mset t alist =
- *   let payload = alist |> List.map ~f:(fun (k, v) -> [k; v]) |> List.concat in
- *   Deferred.Or_error.ignore @@
- *   request_string t ("MSET" :: payload)
- * 
- * let msetnx t alist =
- *   let open Deferred.Result.Let_syntax in
- *   let payload = alist |> List.map ~f:(fun (k, v) -> [k; v]) |> List.concat in
- *   match%bind request t ("MSETNX" :: payload) with
- *   | Resp.Integer 1 -> return true
- *   | Resp.Integer 0 -> return false
- *   | _ -> assert false
- * 
- * let omnidirectional_push command t ?(exist = `Always) ~element ?(elements = []) key =
+let getset t key v =
+  dispatch t bulk (GetSet (key, v))
+
+let getrange t key start stop =
+  dispatch t bulknotnull (GetRange (key, start, stop))
+
+let incr t ?(by=1) key =
+  match by with
+  | 1            -> dispatch t int (Incr key)
+  | -1           -> dispatch t int (Decr key)
+  | n when n > 0 -> dispatch t int (IncrBy (key, n))
+  | _            -> dispatch t int (DecrBy (key, by))
+
+let incrbyfloat t key v = dispatch t float (IncrByFloat (key, v))
+let strlen t key = dispatch t int (StrLen key)
+let hset t h kvs = dispatch t int (HSet (h, kvs))
+let hget t h k = dispatch t bulk (HGet (h, k))
+let hmget t h ks = dispatch t bulkarray (HMGet (h, ks))
+let hgetall t h = dispatch t bulkarraynotnull (HGetAll h) >>|? fun kvs ->
+  List.(map ~f:(function
+      | [k; v] -> (k, v)
+      | _ -> assert false) (chunks_of ~length:2 kvs))
+
+let hdel t h ks = dispatch t int (HDel (h, ks))
+let hexists t h k = dispatch t bool (HExists (h, k))
+let hincrby t h k i = dispatch t int (HIncrBy (h, k, i))
+let hincrbyfloat t h k f = dispatch t float (HIncrByFloat (h, k, f))
+let hkeys t h = dispatch t bulkarraynotnull (HKeys h)
+let hvals t h = dispatch t bulkarraynotnull (HVals h)
+let hlen t h = dispatch t int (HLen h)
+let hstrlen t h k = dispatch t int (HStrLen (h, k))
+
+(* let omnidirectional_push command t ?(exist = `Always) ~element ?(elements = []) key =
  *   let command =
  *     match exist with
  *     | `Always -> command
  *     | `Only_if_exists -> Printf.sprintf "%sX" command
  *   in
- *   request_int t ([command; key; element] @ elements)
- * 
- * let lpush = omnidirectional_push "LPUSH"
- * let rpush = omnidirectional_push "RPUSH"
- * 
- * let lrange t ~key ~start ~stop =
+ *   request_int t ([command; key; element] @ elements) *)
+
+(* let lpush = omnidirectional_push "LPUSH"
+ * let rpush = omnidirectional_push "RPUSH" *)
+
+(* let lrange t ~key ~start ~stop =
  *   let open Deferred.Result.Let_syntax in
  *   match%bind request t ["LRANGE"; key; string_of_int start; string_of_int stop] with
  *   | Resp.Array xs ->
@@ -377,33 +457,25 @@ let get t key = dispatch t bulk (get key) >>|? function
  *           | _ -> assert false)
  *       |> Result.all
  *       |> Deferred.return
- *   | _ -> assert false
- * 
- * let lrem t ~key count ~element = request_int t ["LREM"; key; string_of_int count; element]
- * 
- * let lset t ~key index ~element =
- *   Deferred.Or_error.ignore (request_string t ["LSET"; key; string_of_int index; element])
- * 
- * let ltrim t ~start ~stop key =
- *   Deferred.Or_error.ignore (request_string t ["LTRIM"; key; string_of_int start; string_of_int stop])
- * 
- * let rpoplpush t ~source ~destination = request_bulk t ["RPOPLPUSH"; source; destination]
+ *   | _ -> assert false *)
+
+(* let lrem t ~key count ~element = request_int t ["LREM"; key; string_of_int count; element] *)
+
+(* let lset t ~key index ~element =
+ *   Deferred.Or_error.ignore (request_string t ["LSET"; key; string_of_int index; element]) *)
+
+(* let ltrim t ~start ~stop key =
+ *   Deferred.Or_error.ignore (request_string t ["LTRIM"; key; string_of_int start; string_of_int stop]) *)
+
+(* let rpoplpush t ~source ~destination = request_bulk t ["RPOPLPUSH"; source; destination]
  * let append t ~key value = request_int t ["APPEND"; key; value]
- * let auth t password = Deferred.Or_error.ignore (request_string t ["AUTH"; password])
- * 
- * (\* the documentation says it returns OK, but that's not true *\)
- * let bgrewriteaof t = request_string t ["BGREWRITEAOF"]
- * let bgsave t = request_string t ["BGSAVE"]
- * 
- * let bitcount t ?range key =
- *   let range =
- *     match range with
- *     | None -> []
- *     | Some (start, end_) -> [string_of_int start; string_of_int end_]
- *   in
- *   request_int t (["BITCOUNT"; key] @ range)
- * 
- * type overflow =
+ * let auth t password = Deferred.Or_error.ignore (request_string t ["AUTH"; password]) *)
+
+(* the documentation says it returns OK, but that's not true *)
+(* let bgrewriteaof t = request_string t ["BGREWRITEAOF"]
+ * let bgsave t = request_string t ["BGSAVE"] *)
+
+(* type overflow =
  *   | Wrap
  *   | Sat
  *   | Fail
@@ -411,31 +483,31 @@ let get t key = dispatch t bulk (get key) >>|? function
  * let string_of_overflow = function
  *   | Wrap -> "WRAP"
  *   | Sat -> "SAT"
- *   | Fail -> "FAIL"
- * 
- * (\* Declaration of type of the integer *\)
+ *   | Fail -> "FAIL" *)
+
+(* (\* Declaration of type of the integer *\)
  * type intsize =
  *   | Signed of int
- *   | Unsigned of int
- * 
- * let string_of_intsize = function
+ *   | Unsigned of int *)
+
+(* let string_of_intsize = function
  *   | Signed v -> Printf.sprintf "i%d" v
- *   | Unsigned v -> Printf.sprintf "u%d" v
- * 
- * type offset =
+ *   | Unsigned v -> Printf.sprintf "u%d" v *)
+
+(* type offset =
  *   | Absolute of int
- *   | Relative of int
- * 
- * let string_of_offset = function
+ *   | Relative of int *)
+
+(* let string_of_offset = function
  *   | Absolute v -> string_of_int v
- *   | Relative v -> Printf.sprintf "#%d" v
- * 
- * type fieldop =
+ *   | Relative v -> Printf.sprintf "#%d" v *)
+
+(* type fieldop =
  *   | Get of intsize * offset
  *   | Set of intsize * offset * int
- *   | Incrby of intsize * offset * int
- * 
- * let bitfield t ?overflow key ops =
+ *   | Incrby of intsize * offset * int *)
+
+(* let bitfield t ?overflow key ops =
  *   let open Deferred.Result.Let_syntax in
  *   let ops =
  *     List.map ops ~f:begin function
@@ -465,21 +537,21 @@ let get t key = dispatch t bulk (get key) >>|? function
  *         | Resp.Null -> None :: acc
  *         | _ -> assert false
  *       end
- *   | _ -> assert false
- * 
- * type bitop =
+ *   | _ -> assert false *)
+
+(* type bitop =
  *   | AND
  *   | OR
  *   | XOR
- *   | NOT
- * 
- * let string_of_bitop = function
+ *   | NOT *)
+
+(* let string_of_bitop = function
  *   | AND -> "AND"
  *   | OR -> "OR"
  *   | XOR -> "XOR"
- *   | NOT -> "NOT"
- * 
- * let bitop t ~destkey ?(keys = []) ~key op =
+ *   | NOT -> "NOT" *)
+
+(* let bitop t ~destkey ?(keys = []) ~key op =
  *   request_int t (["BITOP"; string_of_bitop op; destkey; key] @ keys)
  * 
  * let string_of_bit = function
@@ -498,9 +570,9 @@ let get t key = dispatch t bulk (get key) >>|? function
  *   match%bind request t (["BITPOS"; key; string_of_bit bit] @ range) with
  *   | Resp.Integer -1 -> return None
  *   | Resp.Integer n -> return @@ Some n
- *   | _ -> assert false
- * 
- * let getbit t key offset =
+ *   | _ -> assert false *)
+
+(* let getbit t key offset =
  *   let open Deferred.Result.Let_syntax in
  *   let offset = string_of_int offset in
  *   match%bind request t ["GETBIT"; key; offset] with
@@ -515,39 +587,9 @@ let get t key = dispatch t bulk (get key) >>|? function
  *   match%bind request t ["SETBIT"; key; offset; value] with
  *   | Resp.Integer 0 -> return false
  *   | Resp.Integer 1 -> return true
- *   | _ -> assert false
- * 
- * let decr t key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["DECR"; key] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let decrby t key decrement =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["DECRBY"; key; string_of_int decrement] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let incr t key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["INCR"; key] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let incrby t key increment =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["INCRBY"; key; string_of_int increment] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let incrbyfloat t key increment =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["INCRBYFLOAT"; key; string_of_float increment] with
- *   | Resp.Bulk v -> return @@ float_of_string v
- *   | _ -> assert false
- * 
- * let select t index =
+ *   | _ -> assert false *)
+
+(* let select t index =
  *   Deferred.Or_error.ignore @@
  *     request_string t ["SELECT"; string_of_int index]
  * 
@@ -837,122 +879,14 @@ let get t key = dispatch t bulk (get key) >>|? function
  *   let open Deferred.Result.Let_syntax in
  *   match%bind request t ["LLEN"; key] with
  *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let omnidirectional_pop command t key =
+ *   | _ -> assert false *)
+
+(* let omnidirectional_pop command t key =
  *   request t [command; key] >>=? function
  *   | Resp.Bulk s -> Deferred.Or_error.return (Some s)
  *   | Resp.Null -> Deferred.Or_error.return None
  *   | Resp.Error e -> Deferred.Or_error.fail e
- *   | _ -> assert false
- * 
- * let rpop = omnidirectional_pop "RPOP"
- * 
- * let lpop = omnidirectional_pop "LPOP"
- * 
- * let hset t ~element ?(elements = []) key =
- *   let open Deferred.Result.Let_syntax in
- *   let field_values =
- *     element :: elements |> List.map ~f:(fun (f, v) -> [f; v]) |> List.concat
- *   in
- *   match%bind request t (["HSET"; key] @ field_values) with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let hget t ~field key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HGET"; key; field] with
- *   | Resp.Bulk v -> return v
- *   | _ -> assert false
- * 
- * let hmget t ~fields key =
- *   request t (["HMGET"; key] @ fields) >>=? function
- *   | Resp.Array xs -> begin
- *       let all_bindings =
- *         List.map2_exn fields xs ~f:(fun field -> function
- *             | Resp.Bulk v -> field, Some v
- *             | Resp.Null -> field, None
- *             | _ -> assert false) in
- *       let bound_bindings =
- *         List.filter_map all_bindings ~f:(fun (k, v) ->
- *             match v with
- *             | Some v -> Some (k, v)
- *             | None -> None)
- *       in
- *       Deferred.Or_error.return (String.Map.of_alist_exn bound_bindings)
- *     end
- *   | _ -> assert false
- * 
- * let hgetall t key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HGETALL"; key] with
- *   | Resp.Array xs -> (
- *       let kvs =
- *         List.chunks_of xs ~length:2 |>
- *         List.map ~f:(function
- *             | [Resp.Bulk key; Resp.Bulk value] -> Ok (key, value)
- *             | _ -> assert false)
- *         |> Result.all
- *       in
- *       let%bind kvs = Deferred.return kvs in
- *       return (String.Map.of_alist_exn kvs))
- *   | _ -> assert false
- * 
- * let hdel t ?(fields = []) ~field key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t (["HDEL"; key; field] @ fields) with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let hexists t ~field key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HEXISTS"; key; field] with
- *   | Resp.Integer 1 -> return true
- *   | Resp.Integer 0 -> return false
- *   | _ -> assert false
- * 
- * let hincrby t ~field key increment =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HINCRBY"; key; field; string_of_int increment] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let hincrbyfloat t ~field key increment =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HINCRBYFLOAT"; key; field; string_of_float increment] with
- *   | Resp.Bulk fl -> return @@ float_of_string fl
- *   | _ -> assert false
- * 
- * let generic_keyvals command t key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t [command; key] with
- *   | Resp.Array xs ->
- *     let keys =
- *       List.map xs ~f:(function
- *           | Resp.Bulk x -> x
- *           | _ -> assert false)
- *     in
- *     Deferred.Or_error.return keys
- *   | _ -> assert false
- * 
- * let hkeys = generic_keyvals "HKEYS"
- * 
- * let hvals = generic_keyvals "HVALS"
- * 
- * let hlen t key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HLEN"; key] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let hstrlen t ~field key =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["HSTRLEN"; key; field] with
- *   | Resp.Integer n -> return n
- *   | _ -> assert false
- * 
- * let publish t ~channel message =
- *   let open Deferred.Result.Let_syntax in
- *   match%bind request t ["PUBLISH"; channel; message] with
- *   | Resp.Integer n -> return n
  *   | _ -> assert false *)
+
+(* let rpop = omnidirectional_pop "RPOP"
+ * let lpop = omnidirectional_pop "LPOP" *)
