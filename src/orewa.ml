@@ -292,31 +292,45 @@ module Sub = struct
     | String s -> Some (Pong (Some s))
     | _ -> None
 
-  type t = {
-    writer  : sub_cmd Pipe.Writer.t ;
-    pubsub  : pubsub Pipe.Reader.t ;
-  }
+  module T = struct
+    module Address = Uri_sexp
+    type t = {
+      writer  : sub_cmd Pipe.Writer.t ;
+      pubsub  : pubsub Pipe.Reader.t ;
+    }
+
+    let is_closed { pubsub; _ } = Pipe.is_closed pubsub
+    let close { writer; pubsub } =
+      Pipe.close_read pubsub ;
+      Pipe.close writer ;
+      Deferred.unit
+    let close_finished { pubsub; _ } = Pipe.closed pubsub
+  end
+  include T
+  module Persistent = Persistent_connection_kernel.Make(T)
 
   let create r w =
-    let pubsub, pubsub_w = Pipe.create () in
-    let rec recv_loop () =
-      Monitor.try_with (fun () -> Resp.read r) >>= function
-      | Error exn ->
-        Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
-        Deferred.unit
-      | Ok `Eof -> Deferred.unit
-      | Ok (`Ok msg) ->
-        match pubsub_of_resp msg with
-        | None -> assert false
-        | Some msg ->
-          Pipe.write pubsub_w msg >>= fun () ->
-          recv_loop () in
-    let request_writer = Pipe.create_writer begin fun pr ->
-        Pipe.iter_without_pushback pr ~f:begin fun cmd ->
-          try Writer.write w (Resp.to_string (resp_of_sub_cmd cmd)) with _ -> ()
+    let pubsub = Pipe.create_reader ~close_on_exception:false begin fun w ->
+        let rec recv_loop () =
+          Monitor.try_with (fun () -> Resp.read r) >>= function
+          | Error exn ->
+            Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
+            Deferred.unit
+          | Ok `Eof -> Deferred.unit
+          | Ok (`Ok msg) ->
+            match pubsub_of_resp msg with
+            | None -> assert false
+            | Some msg ->
+              Pipe.write w msg >>= fun () ->
+              recv_loop () in
+        recv_loop ()
+      end in
+    let request_writer =
+      Pipe.create_writer begin fun pr ->
+        Writer.transfer w pr begin fun cmd ->
+          Writer.write w (Resp.to_string (resp_of_sub_cmd cmd))
         end
       end in
-    (recv_loop () >>> fun () -> Pipe.close request_writer) ;
     { writer = request_writer; pubsub }
 
   let pubsub { pubsub; _ } = pubsub
@@ -329,10 +343,22 @@ module Sub = struct
   let punsubscribe t pat = dispatch_async t (PUnsubscribe pat)
 end
 
-type t = {
-  waiters : waiter Queue.t ;
-  writer  : request Pipe.Writer.t ;
-}
+module T = struct
+  module Address = Uri_sexp
+  type t = {
+    r: Reader.t ;
+    waiters : waiter Queue.t ;
+    writer  : request Pipe.Writer.t ;
+  }
+
+  let close { writer; _ } =
+    Pipe.close writer ;
+    Deferred.unit
+  let close_finished { r; _ } = Reader.close_finished r
+  let is_closed { r; _ } = Reader.is_closed r
+end
+include T
+module Persistent = Persistent_connection_kernel.Make(T)
 
 let create r w =
   let waiters = Queue.create () in
@@ -380,7 +406,7 @@ let create r w =
   (* Start processing requests. Once the pipe is closed, we signal
      closed to all outstanding waiters after closing the underlying
      socket *)
-  { waiters; writer = request_writer }
+  { r; waiters; writer = request_writer }
 
 let dispatch { writer; _ } typ cmd =
   let ivar = Ivar.create () in

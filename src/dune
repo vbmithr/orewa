@@ -1,5 +1,10 @@
 (library
  (name orewa)
  (public_name orewa)
- (libraries logs-async fmt core async)
- (preprocess (pps ppx_jane)))
+ (preprocess (pps ppx_jane))
+ (libraries
+   uri-sexp
+   logs-async
+   fmt
+   core
+   async))

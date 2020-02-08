@@ -10,6 +10,11 @@ module Sub : sig
     | Exit
 
   type t
+
+  module Persistent : Persistent_connection_kernel.S
+    with type address := Uri.t
+     and type conn := t
+
   val create : Reader.t -> Writer.t -> t
   val pubsub : t -> pubsub Pipe.Reader.t
 
@@ -20,6 +25,11 @@ module Sub : sig
 end
 
 type t
+
+module Persistent : Persistent_connection_kernel.S
+  with type address := Uri.t
+   and type conn := t
+
 val create : Reader.t -> Writer.t -> t
 
 val publish      : t -> string -> string -> int Deferred.Or_error.t
