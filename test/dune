@@ -1,9 +1,3 @@
-(executables
- (public_names pipeline_read pubsub)
- (modules pipeline_read pubsub)
- (preprocess (pps ppx_jane))
- (libraries logs-async-reporter core async orewa))
-
 (test
  (name test)
  (modules test)

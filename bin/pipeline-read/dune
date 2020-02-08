@@ -1,0 +1,7 @@
+(executable
+ (public_name orewa-pipeline-read)
+ (package orewa-pipeline-read)
+ (name pipeline_read)
+ (modules pipeline_read)
+ (preprocess (pps ppx_jane))
+ (libraries logs-async-reporter core async orewa))

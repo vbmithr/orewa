@@ -1,5 +1,6 @@
 open Core
 open Async
+open Orewa
 
 let src = Logs.Src.create "orewa.pubsub_test"
 module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
@@ -13,9 +14,9 @@ let random_string n =
 
 let producer id =
   Tcp.with_connection (Tcp.Where_to_connect.of_host_and_port endp) begin fun _ r w ->
-    let conn = Orewa.create r w in
+    let conn = create r w in
     let rec inner () =
-      Orewa.publish conn ch (random_string 255) >>=? fun nbRead ->
+      publish conn ch (random_string 255) >>=? fun nbRead ->
       Log_async.debug (fun m -> m "Pr %d: %d clients read" id nbRead) >>= fun () ->
       inner () in
     inner ()
@@ -23,9 +24,9 @@ let producer id =
 
 let consumer id =
   Tcp.with_connection (Tcp.Where_to_connect.of_host_and_port endp) begin fun _ r w ->
-    let conn = Orewa.create_sub r w in
-    Orewa.subscribe conn [ch] >>= fun () ->
-    let r = Orewa.pubsub conn in
+    let conn = Sub.create r w in
+    Sub.subscribe conn [ch] >>= fun () ->
+    let r = Sub.pubsub conn in
     Pipe.iter r ~f:begin function
       | Subscribe _ -> Log_async.debug (fun m -> m "Co %d: subscribed" id)
       | Unsubscribe _ -> Log_async.debug (fun m -> m "Co %d: unsubscribed" id)

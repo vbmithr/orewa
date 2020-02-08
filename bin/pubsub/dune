@@ -1,0 +1,7 @@
+(executable
+ (public_name orewa-pubsub)
+ (package orewa-pubsub)
+ (name pubsub)
+ (modules pubsub)
+ (preprocess (pps ppx_jane))
+ (libraries logs-async-reporter core async orewa))
