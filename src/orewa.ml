@@ -270,68 +270,69 @@ let waiter : type a. a Or_error.t Ivar.t option -> a typ -> waiter = fun ivar ty
 let signal_error (Packed_w { ivar; _ }) e =
   Option.iter ivar ~f:(fun ivar -> Ivar.fill ivar (Error e))
 
-type pubsub =
-  | Subscribe of { chn: string; nbSubscribed: int }
-  | Unsubscribe of { chn: string; nbSubscribed: int }
-  | Message of { chn: string; msg: string }
-  | Pong of string option
-  | Exit
+module Sub = struct
+  type pubsub =
+    | Subscribe of { chn: string; nbSubscribed: int }
+    | Unsubscribe of { chn: string; nbSubscribed: int }
+    | Message of { chn: string; msg: string }
+    | Pong of string option
+    | Exit
 
-let pubsub_of_resp resp =
-  let open Resp in
-  match resp with
-  | Array [Bulk Some "subscribe"; Bulk Some chn; Int nbSubscribed] ->
-    Some (Subscribe { chn; nbSubscribed })
-  | Array [Bulk Some "unsubscribe"; Bulk Some chn; Int nbSubscribed] ->
-    Some (Unsubscribe { chn; nbSubscribed })
-  | Array [Bulk Some "message"; Bulk Some chn; Bulk Some msg] ->
-    Some (Message { chn; msg })
-  | String "OK" -> Some Exit
-  | String "PONG" -> Some (Pong None)
-  | String s -> Some (Pong (Some s))
-  | _ -> None
+  let pubsub_of_resp resp =
+    let open Resp in
+    match resp with
+    | Array [Bulk Some "subscribe"; Bulk Some chn; Int nbSubscribed] ->
+      Some (Subscribe { chn; nbSubscribed })
+    | Array [Bulk Some "unsubscribe"; Bulk Some chn; Int nbSubscribed] ->
+      Some (Unsubscribe { chn; nbSubscribed })
+    | Array [Bulk Some "message"; Bulk Some chn; Bulk Some msg] ->
+      Some (Message { chn; msg })
+    | String "OK" -> Some Exit
+    | String "PONG" -> Some (Pong None)
+    | String s -> Some (Pong (Some s))
+    | _ -> None
 
-type sub = {
-  writer  : sub_cmd Pipe.Writer.t ;
-  pubsub  : pubsub Pipe.Reader.t ;
-}
+  type t = {
+    writer  : sub_cmd Pipe.Writer.t ;
+    pubsub  : pubsub Pipe.Reader.t ;
+  }
 
-let pubsub { pubsub; _ } = pubsub
+  let create r w =
+    let pubsub, pubsub_w = Pipe.create () in
+    let rec recv_loop () =
+      Monitor.try_with (fun () -> Resp.read r) >>= function
+      | Error exn ->
+        Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
+        Deferred.unit
+      | Ok `Eof -> Deferred.unit
+      | Ok (`Ok msg) ->
+        match pubsub_of_resp msg with
+        | None -> assert false
+        | Some msg ->
+          Pipe.write pubsub_w msg >>= fun () ->
+          recv_loop () in
+    let request_writer = Pipe.create_writer begin fun pr ->
+        Pipe.iter_without_pushback pr ~f:begin fun cmd ->
+          try Writer.write w (Resp.to_string (resp_of_sub_cmd cmd)) with _ -> ()
+        end
+      end in
+    (recv_loop () >>> fun () -> Pipe.close request_writer) ;
+    { writer = request_writer; pubsub }
+
+  let pubsub { pubsub; _ } = pubsub
+  let dispatch_async ({ writer; _} : t) msg =
+    Pipe.write writer msg
+
+  let subscribe t chns = dispatch_async t (Subscribe chns)
+  let unsubscribe t chns = dispatch_async t (Unsubscribe chns)
+  let psubscribe t pat = dispatch_async t (PSubscribe pat)
+  let punsubscribe t pat = dispatch_async t (PUnsubscribe pat)
+end
 
 type t = {
   waiters : waiter Queue.t ;
   writer  : request Pipe.Writer.t ;
 }
-
-let create_sub r w =
-  let pubsub, pubsub_w = Pipe.create () in
-  let rec recv_loop () =
-    Monitor.try_with (fun () -> Resp.read r) >>= function
-    | Error exn ->
-      Log_async.err (fun m -> m "%a" Exn.pp exn) >>= fun () ->
-      Deferred.unit
-    | Ok `Eof -> Deferred.unit
-    | Ok (`Ok msg) ->
-      match pubsub_of_resp msg with
-      | None -> assert false
-      | Some msg ->
-        Pipe.write pubsub_w msg >>= fun () ->
-        recv_loop () in
-  let request_writer = Pipe.create_writer begin fun pr ->
-      Pipe.iter_without_pushback pr ~f:begin fun cmd ->
-        try Writer.write w (Resp.to_string (resp_of_sub_cmd cmd)) with _ -> ()
-      end
-    end in
-  (recv_loop () >>> fun () -> Pipe.close request_writer) ;
-  { writer = request_writer; pubsub }
-
-let dispatch_async ({ writer; _} : sub) msg =
-  Pipe.write writer msg
-
-let subscribe t chns = dispatch_async t (Subscribe chns)
-let unsubscribe t chns = dispatch_async t (Unsubscribe chns)
-let psubscribe t pat = dispatch_async t (PSubscribe pat)
-let punsubscribe t pat = dispatch_async t (PUnsubscribe pat)
 
 let create r w =
   let waiters = Queue.create () in

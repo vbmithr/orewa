@@ -1,21 +1,23 @@
 open Core
 open Async
 
-type pubsub =
-  | Subscribe   of { chn: string; nbSubscribed: int }
-  | Unsubscribe of { chn: string; nbSubscribed: int }
-  | Message     of { chn: string; msg: string }
-  | Pong        of string option
-  | Exit
+module Sub : sig
+  type pubsub =
+    | Subscribe   of { chn: string; nbSubscribed: int }
+    | Unsubscribe of { chn: string; nbSubscribed: int }
+    | Message     of { chn: string; msg: string }
+    | Pong        of string option
+    | Exit
 
-type sub
-val create_sub : Reader.t -> Writer.t -> sub
-val pubsub : sub -> pubsub Pipe.Reader.t
+  type t
+  val create : Reader.t -> Writer.t -> t
+  val pubsub : t -> pubsub Pipe.Reader.t
 
-val subscribe    : sub -> string list -> unit Deferred.t
-val unsubscribe  : sub -> string list -> unit Deferred.t
-val psubscribe   : sub -> string -> unit Deferred.t
-val punsubscribe : sub -> string -> unit Deferred.t
+  val subscribe    : t -> string list -> unit Deferred.t
+  val unsubscribe  : t -> string list -> unit Deferred.t
+  val psubscribe   : t -> string -> unit Deferred.t
+  val punsubscribe : t -> string -> unit Deferred.t
+end
 
 type t
 val create : Reader.t -> Writer.t -> t
