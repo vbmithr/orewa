@@ -8,15 +8,12 @@ module Log_async = (val Logs_async.src_log src : Logs_async.LOG)
 let rec req conn =
   Log_async.debug (fun m -> m "get %s" key) >>= fun () ->
   Orewa.get conn key >>= function
-  | Ok (Some key) ->
+  | Some key ->
     Log_async.debug (fun m -> m "OK %s" key) >>= fun () ->
     req conn
-  | Ok None ->
+  | None ->
     Log_async.debug (fun m -> m "OK None") >>= fun () ->
     req conn
-  | Error e ->
-    Log_async.debug (fun m -> m "Error %a" Error.pp e) >>= fun () ->
-    return ()
 
 let endp = Host_and_port.create ~host:"localhost" ~port:6379
 
@@ -24,8 +21,7 @@ let main nbIter =
   Tcp.with_connection (Tcp.Where_to_connect.of_host_and_port endp) begin fun _ r w ->
     let conn = Orewa.create r w in
     Log_async.debug (fun m -> m "set key %s" key) >>= fun () ->
-    Deferred.Or_error.return true >>=? fun _b ->
-    Orewa.set conn key "test" >>=? fun b ->
+    Orewa.set conn key "test" >>= fun b ->
     Log_async.debug (fun m -> m "key %s set (%b)" key b) >>= fun () ->
     Deferred.List.init ~how:`Parallel nbIter ~f:(fun _ -> req conn) >>= fun _ ->
     Deferred.Or_error.return ()

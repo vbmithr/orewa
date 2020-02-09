@@ -412,7 +412,7 @@ let dispatch { writer; _ } typ cmd =
   let ivar = Ivar.create () in
   let req = Packed_req { ivar = Some ivar; typ; cmd } in
   Pipe.write writer req >>= fun () ->
-  Ivar.read ivar
+  Deferred.Or_error.ok_exn (Ivar.read ivar)
 
 let publish t chn msg = dispatch t int (Publish (chn, msg))
 let echo t msg = dispatch t bulknotnull (Echo msg)
@@ -424,11 +424,11 @@ let mget t keys = dispatch t bulkarray (MGet keys)
 
 let mset t ?(overwrite=false) kvs =
   match overwrite with
-  | true -> dispatch t string (MSet kvs) >>|? fun _ -> true
-  | false -> dispatch t int (MSetNX kvs) >>|? function 0 -> false | _ -> true
+  | true -> dispatch t string (MSet kvs) >>| fun _ -> true
+  | false -> dispatch t int (MSetNX kvs) >>| function 0 -> false | _ -> true
 
 let set t ?expire ?flag key value =
-  dispatch t string_or_null (Set { expire; flag; key; value }) >>|? function
+  dispatch t string_or_null (Set { expire; flag; key; value }) >>| function
   | Some _ -> true
   | None -> false
 
@@ -450,7 +450,7 @@ let strlen t key = dispatch t int (StrLen key)
 let hset t h kvs = dispatch t int (HSet (h, kvs))
 let hget t h k = dispatch t bulk (HGet (h, k))
 let hmget t h ks = dispatch t bulkarray (HMGet (h, ks))
-let hgetall t h = dispatch t bulkarraynotnull (HGetAll h) >>|? fun kvs ->
+let hgetall t h = dispatch t bulkarraynotnull (HGetAll h) >>| fun kvs ->
   List.(map ~f:(function
       | [k; v] -> (k, v)
       | _ -> assert false) (chunks_of ~length:2 kvs))

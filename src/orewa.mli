@@ -32,38 +32,38 @@ module Persistent : Persistent_connection_kernel.S
 
 val create : Reader.t -> Writer.t -> t
 
-val publish      : t -> string -> string -> int Deferred.Or_error.t
+val publish      : t -> string -> string -> int Deferred.t
 
-val echo         : t -> string -> string Deferred.Or_error.t
-val append       : t -> string -> string -> int Deferred.Or_error.t
-val bitcount     : t -> ?range:(int * int) -> string -> int Deferred.Or_error.t
+val echo         : t -> string -> string Deferred.t
+val append       : t -> string -> string -> int Deferred.t
+val bitcount     : t -> ?range:(int * int) -> string -> int Deferred.t
 
-val get : t -> string -> string option Deferred.Or_error.t
-val set : t -> ?expire:Time_ns.Span.t -> ?flag:[`IfExists|`IfNotExists] -> string -> string -> bool Deferred.Or_error.t
+val get : t -> string -> string option Deferred.t
+val set : t -> ?expire:Time_ns.Span.t -> ?flag:[`IfExists|`IfNotExists] -> string -> string -> bool Deferred.t
 
-val mget : t -> string list -> string option list Deferred.Or_error.t
-val mset : t -> ?overwrite:bool -> (string * string) list -> bool Deferred.Or_error.t
+val mget : t -> string list -> string option list Deferred.t
+val mset : t -> ?overwrite:bool -> (string * string) list -> bool Deferred.t
 
-val getset : t -> string -> string -> string option Deferred.Or_error.t
-val getrange : t -> string -> int -> int -> string Deferred.Or_error.t
+val getset : t -> string -> string -> string option Deferred.t
+val getrange : t -> string -> int -> int -> string Deferred.t
 
-val incr : t -> ?by:int -> string -> int Deferred.Or_error.t
-val incrbyfloat : t -> string -> float -> float Deferred.Or_error.t
+val incr : t -> ?by:int -> string -> int Deferred.t
+val incrbyfloat : t -> string -> float -> float Deferred.t
 
-val strlen : t -> string -> int Deferred.Or_error.t
+val strlen : t -> string -> int Deferred.t
 
-val hset : t -> string -> (string * string) list -> int Deferred.Or_error.t
-val hget : t -> string -> string -> string option Deferred.Or_error.t
-val hmget : t -> string -> string list -> string option list Deferred.Or_error.t
-val hgetall : t -> string -> (string * string) list Deferred.Or_error.t
-val hdel :  t -> string -> string list -> int Deferred.Or_error.t
-val hexists : t -> string -> string -> bool Deferred.Or_error.t
-val hincrby : t -> string -> string -> int -> int Deferred.Or_error.t
-val hincrbyfloat : t -> string -> string -> float -> float Deferred.Or_error.t
-val hkeys : t -> string -> string list Deferred.Or_error.t
-val hvals : t -> string -> string list Deferred.Or_error.t
-val hlen : t -> string -> int Deferred.Or_error.t
-val hstrlen : t -> string -> string -> int Deferred.Or_error.t
+val hset : t -> string -> (string * string) list -> int Deferred.t
+val hget : t -> string -> string -> string option Deferred.t
+val hmget : t -> string -> string list -> string option list Deferred.t
+val hgetall : t -> string -> (string * string) list Deferred.t
+val hdel :  t -> string -> string list -> int Deferred.t
+val hexists : t -> string -> string -> bool Deferred.t
+val hincrby : t -> string -> string -> int -> int Deferred.t
+val hincrbyfloat : t -> string -> string -> float -> float Deferred.t
+val hkeys : t -> string -> string list Deferred.t
+val hvals : t -> string -> string list Deferred.t
+val hlen : t -> string -> int Deferred.t
+val hstrlen : t -> string -> string -> int Deferred.t
 (* val hscan : t -> ?pattern:string -> ?count:int -> string -> (string * string) Pipe.Reader.t *)
 
 (* val lpush : t ->

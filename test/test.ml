@@ -79,20 +79,20 @@ let wc f =
 let test_echo conn =
   let message = "Hello" in
   let%bind response = Orewa.echo conn message in
-  Alcotest.(check se) "ECHO faulty" (Ok message) response;
+  check string "ECHO faulty" message response;
   return ()
 
 let test_set conn =
   let key = random_key () in
   Orewa.set conn key "value" >>= fun res ->
-  Alcotest.(check be) "Successfully SET" (Ok true) res;
+  check bool "Successfully SET" true res;
   Orewa.set conn key ~flag:`IfNotExists "other" >>= fun res ->
-  Alcotest.(check be) "Didn't SET again" (Ok false) res;
+  check bool "Didn't SET again" false res;
   Orewa.set conn key ~flag:`IfExists "other" >>= fun res ->
-  Alcotest.(check be) "Successfully re-SET" (Ok true) res;
+  check bool "Successfully re-SET" true res;
   let not_existing = random_key () in
   Orewa.set conn not_existing ~flag:`IfExists "value" >>= fun res ->
-  Alcotest.(check be) "Didn't SET non-existing" (Ok false) res;
+  check bool "Didn't SET non-existing" false res;
   return ()
 
 let test_get conn =
@@ -100,10 +100,10 @@ let test_get conn =
   let value = random_key () in
   Orewa.set conn key value >>= fun _ ->
   Orewa.get conn key >>= fun res ->
-  Alcotest.(check soe) "Correct response" (Ok (Some value)) res;
+  check (option string) "Correct response" (Some value) res;
   let nonexistent = random_key () in
   Orewa.get conn nonexistent >>= fun res ->
-  Alcotest.(check soe) "Correct response" (Ok None) res;
+  check (option string) "Correct response" None res;
   return ()
 
 let test_getset conn =
@@ -111,22 +111,20 @@ let test_getset conn =
   let value = random_key () in
   let value' = random_key () in
   Orewa.getset conn key value >>= fun res ->
-  Alcotest.(check soe) "Setting non-existing key returns no previous value" (Ok None) res;
+  check (option string) "Setting non-existing key returns no previous value" None res;
   Orewa.getset conn key value' >>= fun res ->
-  Alcotest.(check soe) "Setting existing key returns previous value" (Ok (Some value)) res;
+  check (option string) "Setting existing key returns previous value" (Some value) res;
   return ()
 
 let test_strlen conn =
   let key = random_key () in
   let value = random_key () in
   Orewa.strlen conn key >>= fun res ->
-  Alcotest.(check ie) "Length of empty key is zero" (Ok 0) res;
+  check int "Length of empty key is zero" 0 res;
   Orewa.set conn key value >>= fun _ ->
   Orewa.strlen conn key >>= fun res ->
-  Alcotest.(check ie)
-    "Length of key is determined correctly"
-    (Ok (String.length value))
-    res;
+  check int "Length of key is determined correctly"
+    (String.length value) res;
   return ()
 
 let test_mget conn =
@@ -135,10 +133,8 @@ let test_mget conn =
   let value = random_key () in
   Orewa.set conn key value >>= fun _ ->
   Orewa.mget conn [non_existing_key; key; key] >>= fun res ->
-  Alcotest.(check (result (list (option string)) err))
-    "Correct response"
-    (Ok [None; Some value; Some value])
-    res;
+  check (list (option string)) "Correct response"
+    [None; Some value; Some value] res;
   return ()
 
 let test_msetnx conn =
@@ -148,21 +144,16 @@ let test_msetnx conn =
   let value' = random_key () in
   let key'' = random_key () in
   let value'' = random_key () in
-  let be = Alcotest.(result bool err) in
   Orewa.mset ~overwrite:false conn [key, value; key', value'] >>= fun res ->
-  Alcotest.(check be) "Setting once succeeded" (Ok true) res;
+  check bool "Setting once succeeded" true res;
   let%bind res = Orewa.mget conn [key; key'] in
-  Alcotest.(check (result (list (option string)) err))
-    "Keys as expected"
-    (Ok [Some value; Some value'])
-    res;
+  check (list (option string)) "Keys as expected"
+    [Some value; Some value'] res;
   Orewa.mset ~overwrite:false conn [key', value''; key'', value''] >>= fun res ->
-  Alcotest.(check be) "Setting once succeeded" (Ok false) res;
+  check bool "Setting once succeeded" false res;
   let%bind res = Orewa.mget conn [key; key'; key''] in
-  Alcotest.(check (result (list (option string)) err))
-    "Keys as expected"
-    (Ok [Some value; Some value'; None])
-    res;
+  check (list (option string)) "Keys as expected"
+    [Some value; Some value'; None] res;
   return ()
 
 let test_mset conn =
@@ -171,12 +162,10 @@ let test_mset conn =
   let key' = random_key () in
   let value' = random_key () in
   Orewa.mset ~overwrite:true conn [key, value; key', value'] >>= fun res ->
-  Alcotest.(check be) "Correct response" (Ok true) res;
+  check bool "Correct response" true res;
   Orewa.mget conn [key; key'] >>= fun res ->
-  Alcotest.(check (result (list (option string)) err))
-    "Correct response"
-    (Ok [Some value; Some value'])
-    res;
+  check (list (option string)) "Correct response"
+    [Some value; Some value'] res;
   return ()
 
 (* let test_getrange conn =
@@ -1088,11 +1077,11 @@ let test_hset conn =
   in
   let element = random_element () in
   Orewa.hset conn key [element] >>= fun res ->
-  Alcotest.(check ie) "Set single element" (Ok 1) res;
+  check int "Set single element" 1 res;
   Orewa.hset conn key [element] >>= fun res ->
-  Alcotest.(check ie) "Resetting is no-op" (Ok 0) res;
+  check int "Resetting is no-op" 0 res;
   Orewa.hset conn key [random_element (); random_element (); random_element ()] >>= fun res ->
-  Alcotest.(check ie) "Set multiple elements" (Ok 3) res;
+  check int "Set multiple elements" 3 res;
   return ()
 
 let test_hget conn =
@@ -1102,7 +1091,7 @@ let test_hget conn =
   let element = field, value in
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hget conn key field >>= fun res ->
-  Alcotest.(check soe) "Getting the value that was set" (Ok (Some value)) res;
+  check (option string) "Getting the value that was set" (Some value) res;
   return ()
 
 let test_hmget conn =
@@ -1110,22 +1099,23 @@ let test_hmget conn =
   let k = random_key () in
   let v = random_key () in
   Orewa.hmget conn key [k] >>= fun res ->
-  Alcotest.(check sme) "Getting empty key" (Ok [None]) res;
+  check (list (option string)) "Getting empty key" [None] res;
   Orewa.hset conn key [k, v] >>= fun _ ->
   Orewa.hmget conn key [k] >>= fun res ->
-  Alcotest.(check sme) "Getting the value that was set" (Ok [Some v]) res;
+  check (list (option string)) "Getting the value that was set" [Some v] res;
   return ()
 
 let test_hgetall conn =
+  let strkvlist = (list (pair string string)) in
   let key = random_key () in
   Orewa.hgetall conn key >>= fun res ->
-  Alcotest.(check strkvlist) "Getting an empty map on empty key" (Ok []) res;
+  check strkvlist "Getting an empty map on empty key" [] res;
   let field = random_key () in
   let value = random_key () in
   let element = field, value in
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hgetall conn key >>= fun res ->
-  Alcotest.(check strkvlist) "Getting a map of elements" (Ok [element]) res;
+  check strkvlist "Getting a map of elements" [element] res;
   return ()
 
 let test_hdel conn =
@@ -1134,16 +1124,16 @@ let test_hdel conn =
   let value = random_key () in
   let element = field, value in
   Orewa.hdel conn key [field] >>= fun res ->
-  Alcotest.(check ie) "Deleting from empty hashtable" (Ok 0) res;
+  check int "Deleting from empty hashtable" 0 res;
   let field' = random_key () in
   let element' = field', value in
   let field'' = random_key () in
   let element'' = field'', value in
   Orewa.hset conn key [element; element'; element''] >>= fun _ ->
   Orewa.hdel conn key [field] >>= fun res ->
-  Alcotest.(check ie) "Single delete from filled hashtable" (Ok 1) res;
+  check int "Single delete from filled hashtable" 1 res;
   Orewa.hdel conn key [field'; field''] >>= fun res ->
-  Alcotest.(check ie) "Single delete from filled hashtable" (Ok 2) res;
+  check int "Single delete from filled hashtable" 2 res;
   return ()
 
 let test_hexists conn =
@@ -1152,13 +1142,13 @@ let test_hexists conn =
   let value = random_key () in
   let element = field, value in
   Orewa.hexists conn key field >>= fun res ->
-  Alcotest.(check be) "Asking for nonexisting field on missing key" (Ok false) res;
+  check bool "Asking for nonexisting field on missing key" false res;
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hexists conn key field >>= fun res ->
-  Alcotest.(check be) "Asking for existing key" (Ok true) res;
+  check bool "Asking for existing key" true res;
   Orewa.hdel conn key [field] >>= fun _ ->
   Orewa.hexists conn key field >>= fun res ->
-  Alcotest.(check be) "Asking for deleted key" (Ok false) res;
+  check bool "Asking for deleted key" false res;
   return ()
 
 let test_hincrby conn =
@@ -1166,9 +1156,9 @@ let test_hincrby conn =
   let field = random_key () in
   let value = 42 in
   Orewa.hincrby conn key field value >>= fun res ->
-  Alcotest.(check ie) "Incrementing missing key" (Ok value) res;
+  check int "Incrementing missing key" value res;
   Orewa.hincrby conn key field value >>= fun res ->
-  Alcotest.(check ie) "Incrementing existing key" (Ok (2 * value)) res;
+  check int "Incrementing existing key" (2 * value) res;
   return ()
 
 let test_hincrbyfloat conn =
@@ -1176,9 +1166,9 @@ let test_hincrbyfloat conn =
   let field = random_key () in
   let value = 42. in
   Orewa.hincrbyfloat conn key field value >>= fun res ->
-  Alcotest.(check fe) "Incrementing missing key" (Ok value) res;
+  check (float 0.01) "Incrementing missing key" value res;
   Orewa.hincrbyfloat conn key field value >>= fun res ->
-  Alcotest.(check fe) "Incrementing existing key" (Ok Float.(2. * value)) res;
+  check (float 0.01) "Incrementing existing key" (2. *. value) res;
   return ()
 
 let test_hkeys conn =
@@ -1187,10 +1177,10 @@ let test_hkeys conn =
   let value = random_key () in
   let element = field, value in
   Orewa.hkeys conn key >>= fun res ->
-  Alcotest.(check sle) "Empty hash map" (Ok []) res;
+  check (list string) "Empty hash map" [] res;
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hkeys conn key >>= fun res ->
-  Alcotest.(check sle) "Enumerating existing key" (Ok [field]) res;
+  check (list string) "Enumerating existing key" [field] res;
   return ()
 
 let test_hvals conn =
@@ -1199,10 +1189,10 @@ let test_hvals conn =
   let value = random_key () in
   let element = field, value in
   Orewa.hvals conn key >>= fun res ->
-  Alcotest.(check sle) "Empty hash map" (Ok []) res;
+  check (list string) "Empty hash map" [] res;
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hvals conn key >>= fun res ->
-  Alcotest.(check sle) "Enumerating existing key" (Ok [field]) res;
+  check (list string) "Enumerating existing key" [field] res;
   return ()
 
 let test_hlen conn =
@@ -1211,10 +1201,10 @@ let test_hlen conn =
   let value = random_key () in
   let element = field, value in
   Orewa.hlen conn key >>= fun res ->
-  Alcotest.(check ie) "Empty hash map" (Ok 0) res;
+  check int "Empty hash map" 0 res;
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hlen conn key >>= fun res ->
-  Alcotest.(check ie) "Map with fields" (Ok 1) res;
+  check int "Map with fields" 1 res;
   return ()
 
 let test_hstrlen conn =
@@ -1223,10 +1213,10 @@ let test_hstrlen conn =
   let value = random_key () in
   let element = field, value in
   Orewa.hstrlen conn key field >>= fun res ->
-  Alcotest.(check ie) "Empty hash map" (Ok 0) res;
+  check int "Empty hash map" 0 res;
   Orewa.hset conn key [element] >>= fun _ ->
   Orewa.hstrlen conn key field >>= fun res ->
-  Alcotest.(check ie) "Map with a field" (Ok (String.length value)) res;
+  check int "Map with a field" (String.length value) res;
   return ()
 
 (* let test_hscan conn =

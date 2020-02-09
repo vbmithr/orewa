@@ -16,7 +16,7 @@ let producer id =
   Tcp.with_connection (Tcp.Where_to_connect.of_host_and_port endp) begin fun _ r w ->
     let conn = create r w in
     let rec inner () =
-      publish conn ch (random_string 255) >>=? fun nbRead ->
+      publish conn ch (random_string 255) >>= fun nbRead ->
       Log_async.debug (fun m -> m "Pr %d: %d clients read" id nbRead) >>= fun () ->
       inner () in
     inner ()
