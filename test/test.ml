@@ -1243,8 +1243,9 @@ let test_hstrlen conn =
  *   Alcotest.(check ie) "PUBLISH failed" (Ok 0) res;
  *   return () *)
 
+open Alcotest_async
+
 let tests =
-  let open Alcotest_async in
   let test_case name speed f =
     test_case name speed (fun () -> wc f) in
   [
@@ -1337,6 +1338,9 @@ let tests =
      * test_case "PUBLISH" `Slow test_publish *)
   ]
 
+let main () =
+  run "orewa" ["integration", tests]
+
 let () =
-  Log.Global.set_level `Debug;
-  Alcotest.run Caml.__MODULE__ ["integration", tests]
+  don't_wait_for (main ()) ;
+  never_returns (Scheduler.go ())
